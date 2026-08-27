@@ -2972,8 +2972,9 @@ namespace SnowDeform
 		// v587：节流在调用级（一次遍历盖全部 actor）
 		// v594：300→150ms（动物/NPC 轨迹更连续——300ms 间隔 + 35 门控慢速动物
 		// 盖不出连续沟壑 = "像一个个小洞"实锤）
+		// v603：150→100ms（用户"延迟太大要精确"——动物/尸体痕迹跟随更及时）
 		const unsigned long nowA = GetTickCount();
-		if (nowA - lastAT < 150)
+		if (nowA - lastAT < 100)
 			return;
 		// v589：**每 actor 独立上次位置**（formID -> 位置 + 首见标记）——连续战壕
 		// 需要 prev=上次位置（玩家盖章同款）；v587 的全局 lastAX/lastAY 多 actor
@@ -4469,19 +4470,18 @@ namespace SnowDeform
 		// 改盖章帧下一帧立即重建（延迟 1 帧 ≈16ms）→ 新坑紧跟脚出现。成本：重建
 		// 频率 = 盖章频率（≈每 5 帧 1 次），land 平均 ~1-2ms（可接受）。fullDue 1s
 		// 物品兜底保留（v567 禁用 = false 不变）。
-		bool dirtyDue = landFootDirty.exchange(false);  // v577：非 const（30ms 轻限频可置 false）
+		bool dirtyDue = landFootDirty.exchange(false);  // v603：不限频，dirty 帧立即重建
 		if (!dirtyDue && !landRebuildPending.load() && !fullDue)
 			return;
 		// v576：dirtyDue 帧立即重建（30ms 轻限频防盖章高频帧每帧重建）+ 延迟检测
 		// v577：v576 全限频去除后 rf 涨到 12ms（fp 451 时）；门 48 盖章降到 ~7/s，
 		// 30ms 轻限频不拦（间隔 140ms）但兜底盖章异常高频场景。
-		{
-			static unsigned long lastDirtyT = 0;
-			if (dirtyDue && GetTickCount() - lastDirtyT >= 30)
-				lastDirtyT = GetTickCount();
-			else if (dirtyDue)
-				dirtyDue = false;  // 30ms 内重复 dirty → 跳过（下帧再试）
-			if (dirtyDue) {
+		// v603：**去掉 30ms 轻限频（用户"盖章延迟太大，要精确"）**——30ms 限频在
+		// 200fps 下 = 6 帧延迟（盖章 → dirty → 被限频跳过 → 下帧再试），感知延迟
+		// 明显。v596 后 fp 受控（玩家 200 + obj 80）+ v593 平滑限幅 → rf 3-6ms，
+		// 盖章 42/s ÷ 200fps ≈ 每 4.8 帧重建 1 次（摊薄 ~1ms/帧）成本可接受 →
+		// dirty 帧立即重建（延迟 = 盖章到下一帧 ≈ 5ms 即时）。
+		if (dirtyDue) {
 				const unsigned long setT = gDirtySetT.load(std::memory_order_relaxed);
 				const unsigned long nowR = GetTickCount();
 				if (setT != 0 && nowR >= setT) {
@@ -4498,7 +4498,6 @@ namespace SnowDeform
 				sLdRfMaxUs = std::max(sLdRfMaxUs,
 					std::chrono::duration_cast<std::chrono::microseconds>(tRf1 - tRf0).count());
 			}
-		}
 		auto& cells = landBuf[landBufIdx.load()];
 		// v274：**盖章帧同步补建玩家周围 3×3**——用户建议"走上去一次性就平整"：
 		// 裂缝 = 玩家脚下 cell 还是引擎网格（rebuild 分帧 0.2s 未完成 / 移动中引擎
