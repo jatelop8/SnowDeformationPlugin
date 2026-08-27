@@ -2868,24 +2868,19 @@ namespace SnowDeform
 	}
 
 	// v592：**尸体压痕（TESDeathEvent 死亡事件版）**——死亡事件在死亡瞬间必触发
-	//（游戏主线程），直接在死亡位置盖沿 actor 朝向的椭圆压痕（长 100 宽 50
-	// 深-10.8，纯凹陷）。footMtx 保护与 RebuildField（渲染线程）无竞争。
-	// ScanAnimalFeet 的 ForAllActors 尸体分支保留作兜底（双保险，同位置 max 合成
-	// 无视觉差异）。
+	//（游戏主线程）。footMtx 保护与 RebuildField（渲染线程）无竞争。
+	// v597：**延迟盖章（"尸体不会在地上出现浅浅的坑"修复）**——死亡事件触发时
+	// actor 还没倒地（站立位置），直接盖 = 坑在站立点，尸体倒下后坑被尸体压住/
+	// 错位露不出来（实锤）。改为：只把 actor 加入队列（NiPointer 强引用保活 2s），
+	// ScanAnimalFeet 每 150ms 检查，死亡 2s 后（ragdoll 落定）取尸体最终位置盖
+	// 浅坑（depth 0.35 → -6.3，浅浅的坑，同法术坑的形状思路）。
+	static std::vector<std::pair<RE::NiPointer<RE::Actor>, unsigned long>> g_corpseQ;  // actor + 死亡时间
 	void SnowShellMesh::OnActorDeath(RE::Actor* a)
 	{
 		if (!a || a == RE::PlayerCharacter::GetSingleton() || a->IsPlayer())
 			return;
-		const auto ap = a->GetPosition();
-		const float yaw = a->GetAngle().z * 0.017453292f;  // 度→弧度
-		const float cY = std::cos(yaw), sY = std::sin(yaw);
-		{
-			std::lock_guard<std::mutex> lk(footMtx);
-			footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, cY, sY,
-				50.0f, 25.0f, ap.x, ap.y, 14, GetTickCount() });
-			landFootDirty.store(true);
-		}
-		SKSE::log::info("v592-dbg: corpse={} at=({:.0f},{:.0f})", a->GetDisplayFullName(), ap.x, ap.y);
+		g_corpseQ.emplace_back(RE::NiPointer<RE::Actor>(a), GetTickCount());
+		SKSE::log::info("v597-dbg: death queued={}", a->GetDisplayFullName());
 	}
 
 	void SnowShellMesh::ScanAnimalFeet()
@@ -2896,6 +2891,30 @@ namespace SnowDeform
 			return;
 		const auto pp = pc->GetPosition();
 		static unsigned long lastAT = 0;
+		// v597：**尸体压痕延迟盖章**——死亡事件只入队（OnActorDeath），这里每
+		// 150ms 检查：死亡 >2s（ragdoll 已落定）→ 取尸体最终位置盖浅椭圆压痕
+		//（depth 0.35 → -6.3 浅浅的坑）→ 出队。NiPointer 强引用保证 actor 存活。
+		for (auto it = g_corpseQ.begin(); it != g_corpseQ.end();) {
+			const unsigned long nowC = GetTickCount();
+			if (nowC - it->second <= 2000) {
+				++it;
+				continue;
+			}
+			auto* corpse = it->first.get();
+			if (corpse) {
+				const auto cap = corpse->GetPosition();
+				const float yaw = corpse->GetAngle().z * 0.017453292f;  // 度→弧度
+				const float cY = std::cos(yaw), sY = std::sin(yaw);
+				{
+					std::lock_guard<std::mutex> lk(footMtx);
+					footprints.push_back({ cap.x, cap.y, 0.35f, 0.0f, cY, sY,
+						50.0f, 25.0f, cap.x, cap.y, 14, GetTickCount() });
+					landFootDirty.store(true);
+				}
+				SKSE::log::info("v597-dbg: corpse={} at=({:.0f},{:.0f})", corpse->GetDisplayFullName(), cap.x, cap.y);
+			}
+			it = g_corpseQ.erase(it);
+		}
 		// v587：节流在调用级（一次遍历盖全部 actor）
 		// v594：300→150ms（动物/NPC 轨迹更连续——300ms 间隔 + 35 门控慢速动物
 		// 盖不出连续沟壑 = "像一个个小洞"实锤）
