@@ -1443,6 +1443,12 @@ namespace SnowDeform
 	static std::atomic<long long> gFadeMarkN{ 0 };
 	static std::atomic<long long> gFadeCurN{ 0 };
 	static std::atomic<long long> gFadeSum1000{ 0 };
+	// v576（用户"直接改"，2026-08-27）：盖章→重建延迟检测——gDirtySetT 在盖章置
+	// dirty 时记录，dirtyDue 帧重建时算差值。预期 v576 后 delayAvg ≈ 1 帧（16ms），
+	// 之前 150ms 限频时 ≈150ms（= 雪堆"突然冒出"的闪的延迟来源）。
+	static std::atomic<unsigned long> gDirtySetT{ 0 };
+	static std::atomic<long long>     gDelaySum{ 0 }, gDelayN{ 0 };
+	static std::atomic<unsigned long> gDelayMax{ 0 };
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
 
@@ -2956,6 +2962,7 @@ namespace SnowDeform
 					}
 					}
 					landFootDirty.store(true);
+					gDirtySetT.store(GetTickCount(), std::memory_order_relaxed);  // v576：盖章→重建延迟检测
 					SKSE::log::info("v437b: stamp r={:.1f} at=({:.0f},{:.0f}) depth={:.2f} axis={:.1f}x{:.1f}",
 						st.radius, st.x, st.y, depth, fpRL, fpRS);
 					st.px = st.x;
@@ -4120,25 +4127,27 @@ namespace SnowDeform
 		const bool fullDue = false;
 		if (fullDue)
 			lastFullT = nowF;
-		// v564（帧数优化）：**dirty 帧限频 100ms**——盖章 16-31/s 每步置 dirty →
-		// 每次全量重算+上传（顶点循环 13 万×2 场采样 + ConeCS + 法线 ≈ 5-9ms）。
-		// 限频后全量最多 10 次/s（与 RebuildField 150ms 同频），盖章到几何生效
-		// 延迟 ≤100ms（原 RebuildField 已有 150ms，无新增）。未到期 → 恢复 dirty
-		// 下一帧处理；fullDue 1s 兜底（物品回填视觉）不受影响。
-		static unsigned long lastDirtyT = 0;
-		const bool dirtyDue = landFootDirty.load() && nowF - lastDirtyT >= 100;
-		if (landFootDirty.exchange(false) && !dirtyDue)
-			landFootDirty.store(true);  // 限频未到 → 恢复标志，下一帧处理
-		if (dirtyDue)
-			lastDirtyT = nowF;
+		// v576（用户"直接改"，2026-08-27）：**去 dirty/RebuildField 双限频，盖章立即重建**——
+		// 原 v564 100ms + v407 150ms 限频：盖章 13/s（v437b 实测）→ 新脚印延迟
+		// 150ms 才出现 = "雪堆突然冒出/一闪一闪"（v575 实锤 fadeMark=0 非驱逐，纯延迟）。
+		// 改盖章帧下一帧立即重建（延迟 1 帧 ≈16ms）→ 新坑紧跟脚出现。成本：重建
+		// 频率 = 盖章频率（≈每 5 帧 1 次），land 平均 ~1-2ms（可接受）。fullDue 1s
+		// 物品兜底保留（v567 禁用 = false 不变）。
+		const bool dirtyDue = landFootDirty.exchange(false);
 		if (!dirtyDue && !landRebuildPending.load() && !fullDue)
 			return;
-		// v407：**RebuildField 限频 100ms→150ms（v550b 恢复）**——场重建最多 ~6.7 次/秒
+		// v576：dirtyDue 帧立即重建 + 盖章→重建延迟检测
 		{
-			static unsigned long lastRebuildT = 0;
-			const unsigned long nowR = GetTickCount();
-			if (nowR - lastRebuildT >= 150) {
-				lastRebuildT = nowR;
+			if (dirtyDue) {
+				const unsigned long setT = gDirtySetT.load(std::memory_order_relaxed);
+				const unsigned long nowR = GetTickCount();
+				if (setT != 0 && nowR >= setT) {
+					const unsigned long delay = nowR - setT;
+					gDelaySum.fetch_add(delay, std::memory_order_relaxed);
+					gDelayN.fetch_add(1, std::memory_order_relaxed);
+					unsigned long mx = gDelayMax.load(std::memory_order_relaxed);
+					while (delay > mx && !gDelayMax.compare_exchange_weak(mx, delay, std::memory_order_relaxed)) {}
+				}
 				const auto tRf0 = clkLd::now();
 				RebuildField();
 				const auto tRf1 = clkLd::now();
@@ -4568,6 +4577,15 @@ namespace SnowDeform
 					gFadeMarkN.store(0, std::memory_order_relaxed);
 					gFadeCurN.store(0, std::memory_order_relaxed);
 					gFadeSum1000.store(0, std::memory_order_relaxed);
+					// v576：盖章→重建延迟（预期 avg≈16ms；>100ms 说明限频残留）
+					SKSE::log::info("v576-dbg: rebuild={}/2s delayAvg={:.0f}ms delayMax={}ms",
+						gDelayN.load(std::memory_order_relaxed),
+						gDelayN.load(std::memory_order_relaxed) > 0 ?
+							static_cast<double>(gDelaySum.load(std::memory_order_relaxed)) / gDelayN.load(std::memory_order_relaxed) : 0.0,
+						gDelayMax.load(std::memory_order_relaxed));
+					gDelaySum.store(0, std::memory_order_relaxed);
+					gDelayN.store(0, std::memory_order_relaxed);
+					gDelayMax.store(0, std::memory_order_relaxed);
 				}
 				sLdRfUs = sLdVtUs = sLdUpUs = 0;
 				sLdRfMaxUs = sLdVtMaxUs = sLdUpMaxUs = 0;
