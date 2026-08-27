@@ -2051,6 +2051,21 @@ namespace SnowDeform
 						// tMs=0 → decay=1 无影响。
 						if (fall * fp.depth * decay > d) d = fall * fp.depth * decay;
 					}
+					// v599：**尸体雪丘环（用户选"结合"——中间凹坑 + 周围雪丘埋尸，
+					// 对齐 CS CombineCS 埋尸雪丘思路）**——尸体压痕（shape=14 单点，
+					// segLenSq≈0）在椭圆凹坑外堆一圈雪丘（sin² 钟形，坑边 rS →
+					// 2.8×rS），模拟雪慢慢埋住尸体形成的鼓包。活体动物脚印（shape=14
+					// 但 segLen>0）走战壕分支不进来。decay 乘入（30s 半衰雪丘同步变浅）。
+					if (fp.shape == 14 && segLenSq <= 1.0e-4f) {
+						const float dist2 = std::sqrt(dx * dx + dy * dy);
+						const float rC2 = std::max(fp.rS, 8.0f);
+						if (dist2 > rC2 && dist2 < 2.8f * rC2) {
+							const float st2 = (dist2 - rC2) / (1.8f * rC2);
+							const float sinT2 = std::sin(st2 * 3.14159265f);
+							const float mound = sinT2 * sinT2 * 20.0f * fp.depth * decay;  // 雪丘（埋尸鼓包）
+							if (mound > r) r = mound;
+						}
+					}
 					// v342：**鞋底形状 mask**（fp.shape=1/2，游戏线程扫描的鞋网格投影）——
 					// 精确鞋形凹陷（鞋底内满深）+ 鞋边挤出雪堆。mask 用鞋朝向（sh.dir）
 					// 栅格化（鞋形朝鞋头），叠加在胶囊/椭圆之上（鞋形满深嵌在战壕里）。
