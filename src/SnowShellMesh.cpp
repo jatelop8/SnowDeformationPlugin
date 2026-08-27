@@ -1460,6 +1460,8 @@ namespace SnowDeform
 	static std::atomic<long long>     gConeN{ 0 };  // v579：ConeCS 削坡执行计数（应 ≈ 盖章帧数）
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
+	static std::atomic<long long> gRebAnimalFoot{ 0 };   // v588：shape=14（NPC/动物）脚印场写入统计
+	static std::atomic<long long> gRebAnimalWrite{ 0 };
 
 	// v573：**INI 配置加载**（游戏线程 SKSEPlugin_Load 调一次）——
 	// Data/SKSE/Plugins/DynamicSnow.ini：
@@ -2069,6 +2071,12 @@ namespace SnowDeform
 						gRebObjFoot.fetch_add(1, std::memory_order_relaxed);
 						if (d > 0.0f || r > 0.0f)
 							gRebObjWrite.fetch_add(1, std::memory_order_relaxed);
+					}
+					// v588-dbg：NPC/动物脚印（shape=14）场写入统计——确认 obj 场真有值
+					if (fp.shape == 14) {
+						gRebAnimalFoot.fetch_add(1, std::memory_order_relaxed);
+						if (d > 0.0f || r > 0.0f)
+							gRebAnimalWrite.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
 			}
@@ -2941,6 +2949,15 @@ namespace SnowDeform
 							6.0f, 4.0f, fpw.x, fpw.y, 14, GetTickCount() });
 						shell.landFootDirty.store(true);
 					}
+					// v588-dbg：盖章位置（首 10 个）——确认盖在正确位置（脚 vs 玩家）
+					static int sDbgStampLog = 0;
+					if (sDbgStampLog < 10) {
+						sDbgStampLog++;
+						const float dPx = fpw.x - pp.x, dPy = fpw.y - pp.y;
+						SKSE::log::info("v588-dbg: stamp14 actor={} at=({:.0f},{:.0f},{:.0f}) distP={:.0f}",
+							a->GetDisplayFullName(), fpw.x, fpw.y, fpw.z,
+							std::sqrt(dPx * dPx + dPy * dPy));
+					}
 					stamped++;
 					sDbgStamped++;
 				}
@@ -2956,7 +2973,9 @@ namespace SnowDeform
 		const unsigned long nowDbg = GetTickCount();
 		if (nowDbg - lastDbgT >= 2000) {
 			lastDbgT = nowDbg;
-			SKSE::log::info("v587-dbg: actors2s={} stamped2s={}", sDbgActors, sDbgStamped);
+			SKSE::log::info("v587-dbg: actors2s={} stamped2s={} aFoot={} aWrite={}", sDbgActors, sDbgStamped,
+				gRebAnimalFoot.load(std::memory_order_relaxed),
+				gRebAnimalWrite.load(std::memory_order_relaxed));
 			sDbgActors = 0;
 			sDbgStamped = 0;
 		}
