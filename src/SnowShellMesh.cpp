@@ -2917,8 +2917,18 @@ namespace SnowDeform
 			footprints.push_back({ ap.x, ap.y, 0.35f, 0.0f, cY, sY,
 				50.0f, 25.0f, ap.x, ap.y, 14, GetTickCount() });
 			landFootDirty.store(true);
+			// v600-dbg：盖章后列表状态（定位"盖了但看不到"——是否被驱逐/重叠/丢失）
+			int near14 = 0;
+			for (const auto& f : footprints) {
+				if (f.shape == 14) {
+					const float ddx = f.x - ap.x, ddy = f.y - ap.y;
+					if (ddx * ddx + ddy * ddy < 2500.0f)
+						near14++;
+				}
+			}
+			SKSE::log::info("v600-dbg: dropped={} at=({:.0f},{:.0f}) fp={} near14={}",
+				actor->GetDisplayFullName(), ap.x, ap.y, footprints.size(), near14);
 		}
-		SKSE::log::info("v598-dbg: corpse dropped={} at=({:.0f},{:.0f})", actor->GetDisplayFullName(), ap.x, ap.y);
 	}
 
 	void SnowShellMesh::ScanAnimalFeet()
