@@ -105,6 +105,10 @@ namespace SnowDeform
 		//（shape=14 蹄印：小椭圆坑+小雪堆，300s 回填）。动物静止时脚不动 → 距离节流
 		// 天然防重复；人形（FaceGenHead race）排除。
 		void ScanAnimalFeet();
+		// v592：**尸体压痕（TESDeathEvent 死亡事件版）**——ForEachHighActor/ForAllActors
+		// 都扫不到已移出 process list 的尸体（v590-dbg corpse=0 实锤）→ 死亡事件在
+		// 死亡瞬间必触发（游戏线程），直接盖沿朝向椭圆压痕。main.cpp 注册 sink。
+		void OnActorDeath(RE::Actor* a);
 		// v562：脚印贴花（v561 系列 SimpleDecal 路线）已全部移除（用户拍板——引擎
 		// Initialize 不建几何 geom3d=0x0 实锤，手动构造不可控）
 		// v207：分帧构建——main.cpp Present 驱动（渲染线程检测队列 → 游戏线程 Tick）

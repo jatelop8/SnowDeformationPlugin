@@ -1501,9 +1501,18 @@ namespace SnowDeform
 		// 玩家脚印为主（无物品滚动/武器敲击）时 rf 显著下降；有物品时行为不变。
 		// v574：**清理淡出完成**（dieAt 标记后 2s 渐隐结束 → 真正删除）——
 		// 淡出期间脚印保留在列表（场写入乘 fade 渐隐），完成后 remove_if 清除。
+		// v592：**动物脚印过期淡出（狼群 rf 22ms 修复）**——v591 的 30s 半衰只让
+		// 场写入值变小，但脚印项仍在列表撑大影响框（驱逐只在盖章时触发，盖章停后
+		// 无人清理 → fp 涨到 420、rf 18-22ms 实锤）。shape=14 且存在 >30s → 标记
+		// dieAt（2s 淡出）→ 下一轮 erase 删除 → 框收缩 rf 恢复。玩家/物品/武器
+		//（shape<=3 或 9-13）不受影响。
 		{
 			std::lock_guard<std::mutex> lkF03(footMtx);
 			const unsigned long nowDie = GetTickCount();
+			for (auto& f : footprints) {
+				if (f.shape == 14 && f.dieAt == 0 && f.tMs != 0 && nowDie - f.tMs > 30000)
+					f.dieAt = nowDie;
+			}
 			footprints.erase(std::remove_if(footprints.begin(), footprints.end(),
 								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 2000; }),
 				footprints.end());
@@ -2817,6 +2826,27 @@ namespace SnowDeform
 		if (skyrim_cast<const RE::hkpListShape*>(shape))
 			return nullptr;
 		return shape;
+	}
+
+	// v592：**尸体压痕（TESDeathEvent 死亡事件版）**——死亡事件在死亡瞬间必触发
+	//（游戏主线程），直接在死亡位置盖沿 actor 朝向的椭圆压痕（长 100 宽 50
+	// 深-10.8，纯凹陷）。footMtx 保护与 RebuildField（渲染线程）无竞争。
+	// ScanAnimalFeet 的 ForAllActors 尸体分支保留作兜底（双保险，同位置 max 合成
+	// 无视觉差异）。
+	void SnowShellMesh::OnActorDeath(RE::Actor* a)
+	{
+		if (!a || a == RE::PlayerCharacter::GetSingleton() || a->IsPlayer())
+			return;
+		const auto ap = a->GetPosition();
+		const float yaw = a->GetAngle().z * 0.017453292f;  // 度→弧度
+		const float cY = std::cos(yaw), sY = std::sin(yaw);
+		{
+			std::lock_guard<std::mutex> lk(footMtx);
+			footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, cY, sY,
+				50.0f, 25.0f, ap.x, ap.y, 14, GetTickCount() });
+			landFootDirty.store(true);
+		}
+		SKSE::log::info("v592-dbg: corpse={} at=({:.0f},{:.0f})", a->GetDisplayFullName(), ap.x, ap.y);
 	}
 
 	void SnowShellMesh::ScanAnimalFeet()

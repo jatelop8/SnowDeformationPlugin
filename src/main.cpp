@@ -327,6 +327,23 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface*, 
 	return true;
 }
 
+// v592：**死亡事件 sink（尸体压痕）**——ForEachHighActor/ForAllActors 扫不到已移出
+// process list 的尸体（v590-dbg corpse=0 实锤）→ 死亡瞬间事件必触发，直接盖压痕
+struct DeathSink : RE::BSTEventSink<RE::TESDeathEvent>
+{
+	RE::BSEventNotifyControl ProcessEvent(const RE::TESDeathEvent* a_evn,
+		RE::BSTEventSource<RE::TESDeathEvent>*) override
+	{
+		if (a_evn && a_evn->actorDying) {
+			// actorDying 是 NiPointer<TESObjectREFR> → 转 Actor*（非 actor 的 REFR 忽略）
+			if (auto* actor = a_evn->actorDying->As<RE::Actor>())
+				SnowDeform::GetSnowShellMesh().OnActorDeath(actor);
+		}
+		return RE::BSEventNotifyControl::kContinue;
+	}
+};
+static DeathSink g_deathSink;
+
 extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 {
 	// SKSE::Init 内部已自动初始化 spdlog 日志（CommonLibSSE-NG 4.x）：
@@ -345,6 +362,11 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	// 引擎每次构建/重建 quad 网格时我们立即 setMesh 换成高密度网格（SmoothTerrain
 	// 方式），根治"F9 事后替换只 2 块生效"（引擎渲染管线缓存旧引用）。
 	SnowDeform::GetSnowShellMesh().InstallQuadBuildHook();
+
+	// v592：死亡事件注册（尸体压痕——死亡瞬间在倒下位置盖椭圆压痕）。
+	// ScriptEventSourceHolder 提供 AddEventSink<T> 模板（内部 GetEventSource 转派）
+	RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink(&g_deathSink);
+	SKSE::log::info("DynamicSnow: death event sink registered");
 
 	// 注册 Papyrus 全局函数（控制台可调用）
 	if (SKSE::GetPapyrusInterface()->Register([](RE::BSScript::IVirtualMachine* a_vm) {
