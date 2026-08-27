@@ -219,7 +219,6 @@ namespace SnowDeform
 		for (const auto& [k, v] : currentPositions)
 			g_stampPrevPositions[k] = v;
 
-		lastStampCount = stampCount;
 		return stampCount;
 	}
 

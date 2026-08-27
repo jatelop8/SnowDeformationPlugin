@@ -58,11 +58,4 @@ namespace SnowDeform
 	{
 		return RTTIIsA(a_obj, a_className) ? static_cast<T*>(a_obj) : nullptr;
 	}
-
-	// 便捷转换：NiObject → 目标类指针（替代 dynamic_cast，材质等）
-	template <class T>
-	[[nodiscard]] inline T* AsNi(RE::NiObject* a_obj, const char* a_className)
-	{
-		return RTTIIsA(a_obj, a_className) ? static_cast<T*>(a_obj) : nullptr;
-	}
 }

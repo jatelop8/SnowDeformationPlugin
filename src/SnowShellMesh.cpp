@@ -591,9 +591,13 @@ namespace SnowDeform
 		const float dx = a_playerPos.x - lastTerrainPos.x;
 		const float dy = a_playerPos.y - lastTerrainPos.y;
 		if (terrainVersion.load() == 0 || dx * dx + dy * dy > 0.5f * 0.5f) {
-			terrainSampling = true;
 			lastTerrainPos = a_playerPos;
 			SKSE::GetTaskInterface()->AddTask([this]() { DoTerrainSample(); });
+		} else {
+			// v609：**停摆修复**——位移 ≤0.5 且已采过样 → 不调度，标志位必须复位，
+			// 否则 exchange(true) 已置位且永不释放 → 后续所有调用提前返回，地形高度
+			// 缓存永久停更（站立一帧即死锁）。
+			terrainSampling.store(false);
 		}
 	}
 
@@ -732,16 +736,8 @@ namespace SnowDeform
 		}
 	}
 
-	void SnowShellMesh::InstallQuadBuildHook()
-	{
-		// v199：**detour builder 入口方案废弃**（v198 实测闪退）——write_branch<5> 只复制
-		// 入口前 5 字节，若第一条指令 >5 字节 → trampoline 跳回 +5 = 指令中间 → 执行非法
-		// 内存崩溃（崩溃日志实锤：SkyrimSE 18805+0x150 jmp trampoline → [0] 执行不可读）。
-		// SmoothTerrain 刻意只 patch call site（E8 固定 5 字节安全）而不 detour 入口，
-		// 就是这个原因。且 SmoothTerrain 已占 call site，我们找不到可 patch 的调用点。
-		// **改回 v160 轮询恢复**（引擎重建 → 1 秒内自动重新 BuildHighResMesh 换回）。
-		SKSE::log::warn("v199: detour builder approach abandoned (crash on entry>5B instruction); using v160 polling recovery");
-	}
+	// v609：删 InstallQuadBuildHook 空实现（v199 已弃用 detour——只剩 warn 日志，
+	// main.cpp 调用点同步移除）
 
 	// v563：v172/v442-v444 动态视差（diffuse alpha 注入 / Terrain Helper 接入）已全部
 	// 移除（用户拍板关闭 + v563 代码清理）——纯几何变形版。
@@ -891,6 +887,12 @@ namespace SnowDeform
 			const auto posOff = rtd.vertexDesc.GetAttributeOffset(RE::BSGraphics::Vertex::Attribute::VA_POSITION);
 			SKSE::log::info("v126-dbg: geom[{}] verts={} tris={} stride={} posOff={} rendererData={}",
 				q, vc, tc, stride, posOff, static_cast<void*>(rtd.rendererData));
+			// v609：**判空保护**——geom 无 rendererData（空 LOD/未加载）时跳过采样，
+			// 否则 `*(rendererData+0x20)` 空指针解引用崩溃（诊断路径 F9 触发）
+			if (!rtd.rendererData) {
+				SKSE::log::info("v126-dbg:   geom[{}] no rendererData, skip", q);
+				continue;
+			}
 			// 顶点采样 + world 变换
 			auto* rawV = *reinterpret_cast<std::uint8_t**>(
 				reinterpret_cast<std::uintptr_t>(rtd.rendererData) + 0x20);
@@ -1651,17 +1653,23 @@ namespace SnowDeform
 			clrY0 = std::max(clrY0 - 1, 0);
 			clrX1 = std::min(clrX1 + 1, dim - 1);
 			clrY1 = std::min(clrY1 + 1, dim - 1);
-			for (int gy = clrY0; gy <= clrY1; gy++) {
-				const auto row = static_cast<std::size_t>(gy) * dim;
-				float* df = deformField.data() + row;
-				float* rf = ridgeField.data() + row;
-				std::fill(df + clrX0, df + clrX1 + 1, 0.0f);
-				std::fill(rf + clrX0, rf + clrX1 + 1, 0.0f);
-				if (needObjClear) {
-					float* dfo = deformFieldObj.data() + row;
-					float* rfo = ridgeFieldObj.data() + row;
-					std::fill(dfo + clrX0, dfo + clrX1 + 1, 0.0f);
-					std::fill(rfo + clrX0, rfo + clrX1 + 1, 0.0f);
+			// v609：**越界保护**——快速旅行后残留脚印可能在当前场外（gx0/gx1 分别
+			// 只钳下/上界 → curSmin>curSmax 框倒置），并集后 clrX0 可能 > clrX1 → 
+			// std::fill 首指针越过尾指针 = 越界野写（v550b 同款 mov 写崩）。框倒置
+			// 即无区域需清，跳过。
+			if (clrX0 <= clrX1 && clrY0 <= clrY1) {
+				for (int gy = clrY0; gy <= clrY1; gy++) {
+					const auto row = static_cast<std::size_t>(gy) * dim;
+					float* df = deformField.data() + row;
+					float* rf = ridgeField.data() + row;
+					std::fill(df + clrX0, df + clrX1 + 1, 0.0f);
+					std::fill(rf + clrX0, rf + clrX1 + 1, 0.0f);
+					if (needObjClear) {
+						float* dfo = deformFieldObj.data() + row;
+						float* rfo = ridgeFieldObj.data() + row;
+						std::fill(dfo + clrX0, dfo + clrX1 + 1, 0.0f);
+						std::fill(rfo + clrX0, rfo + clrX1 + 1, 0.0f);
+					}
 				}
 			}
 		}
@@ -1936,7 +1944,8 @@ namespace SnowDeform
 								const int v = static_cast<int>(vf);
 								if (u >= 0 && u < shT.maskDim && v >= 0 && v < shT.maskDim) {
 									if (shT.mask[static_cast<std::size_t>(v) * shT.maskDim + u] > 0.5f) {
-										if (fp.depth > d) d = fp.depth;  // 鞋形沟壑满深
+										// v609：漏乘 decay（鞋形主坑与周边渐变不一致）——与 2109 鞋底分支一致
+										if (fp.depth * decay > d) d = fp.depth * decay;
 									} else {
 										bool isNear = false;
 										for (int dv = -1; dv <= 1 && !isNear; ++dv)
@@ -1946,10 +1955,10 @@ namespace SnowDeform
 													shT.mask[static_cast<std::size_t>(nv) * shT.maskDim + nu] > 0.5f)
 													isNear = true;
 											}
-										if (isNear) {
-												const float m = 9.0f * fp.depth;  // v442b：鞋边雪堆 16→9（随坑沿 22→12 同比例降，别盖坑）
-											if (m > r) r = m;
-										}
+									if (isNear) {
+											const float m = 9.0f * fp.depth * decay;  // v442b：鞋边雪堆 16→9（随坑沿 22→12 同比例降，别盖坑）；v609 补 decay
+										if (m > r) r = m;
+									}
 									}
 								}
 								// mask 边缘外不做任何（鞋形战壕无圆环；端点由椭圆鞋印收尾）
@@ -2108,7 +2117,7 @@ namespace SnowDeform
 												isNear = true;
 										}
 									if (isNear) {
-										const float m = 9.0f * fp.depth;  // v442b：鞋边雪堆 16→9（椭圆 mask 分支，同比例降）
+										const float m = 9.0f * fp.depth * decay;  // v442b：鞋边雪堆 16→9（椭圆 mask 分支）；v609 补 decay
 										if (m > r) r = m;
 									}
 								}
@@ -2477,297 +2486,7 @@ namespace SnowDeform
 		return nullptr;
 	}
 
-	// v288：**鞋 mesh 检测**——盖章以玩家实际穿的鞋为准（用户思路：位置和形状
-	// 看鞋子而不是玩家/脚踝）。找几何 mesh，读其 CPU 顶点 → world 矩阵变换 →
-	// 沿鞋轴（world 矩阵列0 = 鞋头方向 / 列1 = 鞋宽方向）投影 → 真实鞋长/宽 +
-	// 鞋底水平中心 + 鞋头方向。找不到（裸足）→ 返回 false，盖章回退固定 30/18。
-	// v292：**全局搜索 + 启发式**——v290 树 dump 实锤装备 mesh 挂在 NPC 根下
-	// " (formID)" 节点（**不在 foot 骨骼子节点**，v288 按 foot 子节点找必失败 →
-	// 实测 boot="none"）。改为遍历玩家 3D 树所有 NiTriShape/BSTriShape，启发式
-	// 选"鞋"：world 中心距对应脚 <55、沿鞋轴长 25-80 宽 10-45，取距离最近者。
-	// 裸足/误判 → false 兜底。注意：RTTI 名字链判断（NiUtils），禁止 dynamic_cast；
-	// 每步盖章时调用一次（全树几何顶点 ~1 万次操作，可忽略）；world transform
-	// 偏移（scale @0x078、rotate @0x07C、translate @0x0A0，v122 验证过）。
-	static bool FindBootMesh(RE::NiAVObject* a_root, float a_footX, float a_footY,
-		float& a_len, float& a_wid, float& a_cx, float& a_cy, float& a_dx, float& a_dy,
-		std::string& a_name, std::vector<float>& a_mask, int& a_maskDim)
-	{
-		float bestDist2 = 55.0f * 55.0f;
-		bool found = false;
-		// v296：诊断——统计几何候选，miss 时输出最近候选的尺寸/距离（定位"为什么
-		// 没找到鞋"：尺寸筛选太严？距离太远？还是真裸足）
-		int candCount = 0;
-		float missLen = 0.0f, missWid = 0.0f, missDist = 1e30f;
-		std::string missName = "(none)";
-		std::function<void(RE::NiAVObject*)> walk = [&](RE::NiAVObject* n) {
-			if (!n)
-				return;
-			RE::NiGeometry* geom = nullptr;
-			if (RTTIIsA(n, "NiTriShape"))
-				geom = static_cast<RE::NiGeometry*>(n);
-			else if (RTTIIsA(n, "BSTriShape"))
-				geom = static_cast<RE::NiGeometry*>(n);
-			if (geom) {
-				auto* data = geom->GetRuntimeData().spModelData.get();
-				if (data && data->vertex && data->GetActiveVertexCount() > 0) {
-					const auto* wm = reinterpret_cast<const float*>(
-						reinterpret_cast<std::uintptr_t>(n) + 0x07C);
-					const float scl = *reinterpret_cast<const float*>(
-						reinterpret_cast<std::uintptr_t>(n) + 0x078);
-					const float tx = wm[9], ty = wm[10];
-					float c0x = wm[0], c0y = wm[3];
-					float c1x = wm[1], c1y = wm[4];
-					const float l0 = std::sqrt(c0x * c0x + c0y * c0y);
-					const float l1 = std::sqrt(c1x * c1x + c1y * c1y);
-					if (l0 > 0.01f && l1 > 0.01f) {
-						c0x /= l0;
-						c0y /= l0;
-						c1x /= l1;
-						c1y /= l1;
-						float min0 = 1e30f, max0 = -1e30f, min1 = 1e30f, max1 = -1e30f;
-						float sx = 0.0f, sy = 0.0f;
-						const auto* verts = data->vertex;
-						const std::uint32_t vn = data->GetActiveVertexCount();
-						// v342：mask 收集——顶点投影到鞋轴局部 (u,v) 栅格（鞋底形状）
-						// v436：**精度 40→64 + 膨胀填洞**——40×40 对 60×36 的鞋 ≈ 1.5 单位/格
-						// 偏粗（鞋头/鞋跟圆角丢失）；64×64 ≈ 0.9 单位/格，形状更写实。
-						// 顶点占据后做 1 次 3×3 膨胀（鞋底内部顶点稀疏/网格镂空 → mask 空洞
-						// → 沟壑里出现"岛"；闭运算填洞）。
-						std::vector<std::uint8_t> localMask;
-						const int lDim = 64;
-						localMask.assign(static_cast<std::size_t>(lDim) * lDim, 0);
-						for (std::uint32_t i = 0; i < vn; ++i) {
-							const float lx = verts[i].x * scl, ly = verts[i].y * scl, lz = verts[i].z * scl;
-							const float wx = wm[0] * lx + wm[1] * ly + wm[2] * lz + tx;
-							const float wy = wm[3] * lx + wm[4] * ly + wm[5] * lz + ty;
-							const float p0 = wx * c0x + wy * c0y;
-							const float p1 = wx * c1x + wy * c1y;
-							if (p0 < min0) min0 = p0;
-							if (p0 > max0) max0 = p0;
-							if (p1 < min1) min1 = p1;
-							if (p1 > max1) max1 = p1;
-							sx += wx;
-							sy += wy;
-						}
-						const float len = max0 - min0;
-						const float wid = max1 - min1;
-						const float cx = sx / static_cast<float>(vn);
-						const float cy = sy / static_cast<float>(vn);
-						// v342：用已确定的 len/wid 栅格化鞋底 mask（只对候选鞋做，省开销）
-						if (len >= 25.0f && len <= 80.0f && wid >= 10.0f && wid <= 45.0f) {
-							const float uf = static_cast<float>(lDim - 1) / len;
-							const float vf = static_cast<float>(lDim - 1) / wid;
-							for (std::uint32_t i = 0; i < vn; ++i) {
-								const float lx = verts[i].x * scl, ly = verts[i].y * scl, lz = verts[i].z * scl;
-								const float wx = wm[0] * lx + wm[1] * ly + wm[2] * lz + tx;
-								const float wy = wm[3] * lx + wm[4] * ly + wm[5] * lz + ty;
-								const int u = static_cast<int>((wx * c0x + wy * c0y - min0) * uf);
-								const int v = static_cast<int>((wx * c1x + wy * c1y - min1) * vf);
-								if (u >= 0 && u < lDim && v >= 0 && v < lDim)
-									localMask[static_cast<std::size_t>(v) * lDim + u] = 1;
-							}
-							// v436：1 次 3×3 膨胀填洞（闭运算）
-							std::vector<std::uint8_t> dilated(static_cast<std::size_t>(lDim) * lDim, 0);
-							for (int v = 0; v < lDim; v++) {
-								for (int u = 0; u < lDim; u++) {
-									if (localMask[static_cast<std::size_t>(v) * lDim + u]) {
-										dilated[static_cast<std::size_t>(v) * lDim + u] = 1;
-										continue;
-									}
-									bool any = false;
-									for (int dv = -1; dv <= 1 && !any; dv++)
-										for (int du = -1; du <= 1 && !any; du++) {
-											const int nu = u + du, nv = v + dv;
-											if (nu >= 0 && nu < lDim && nv >= 0 && nv < lDim &&
-												localMask[static_cast<std::size_t>(nv) * lDim + nu])
-												any = true;
-										}
-									if (any)
-										dilated[static_cast<std::size_t>(v) * lDim + u] = 1;
-								}
-							}
-							localMask = std::move(dilated);
-						}
-						// v296：记录最近未匹配候选（诊断）
-						const float ddx = cx - a_footX, ddy = cy - a_footY;
-						const float ddc = std::sqrt(ddx * ddx + ddy * ddy);
-						candCount++;
-						if (ddc < missDist) {
-							missDist = ddc;
-							missLen = len;
-							missWid = wid;
-							missName = n->name.empty() ? std::string("(unnamed)") : std::string(n->name.c_str());
-						}
-						// 启发式：尺寸像鞋 + 距脚近
-						if (len >= 25.0f && len <= 80.0f && wid >= 10.0f && wid <= 45.0f) {
-							const float dx = cx - a_footX, dy = cy - a_footY;
-							const float d2 = dx * dx + dy * dy;
-							if (d2 < bestDist2) {
-								bestDist2 = d2;
-								a_len = len;
-								a_wid = wid;
-								a_cx = cx;
-								a_cy = cy;
-								a_dx = c0x;
-								a_dy = c0y;
-								a_name = n->name.empty() ? std::string("(unnamed)") : std::string(n->name.c_str());
-								// v342：40×40 localMask（u 轴=len、v 轴=wid 归一化）→ a_mask
-								// 固定 40×40 存储；栅格化时按 len/wid 反算，无降采样误差。
-								a_mask.assign(static_cast<std::size_t>(lDim) * lDim, 0.0f);
-								for (int my = 0; my < lDim; ++my)
-									for (int mx = 0; mx < lDim; ++mx)
-										a_mask[static_cast<std::size_t>(my) * lDim + mx] =
-											localMask[static_cast<std::size_t>(my) * lDim + mx] ? 1.0f : 0.0f;
-								a_maskDim = lDim;
-								found = true;
-							}
-						}
-					}
-				}
-			}
-			if (auto* nd = As<RE::NiNode>(n, "NiNode")) {
-				for (auto& c : nd->GetChildren()) {
-					if (c)
-						walk(c.get());
-				}
-			}
-		};
-		walk(a_root);
-		if (!found) {
-			SKSE::log::info("v296: boot miss candidates={} nearest=\"{}\" len={:.0f} wid={:.0f} dist={:.0f}",
-				candCount, missName, missLen, missWid, missDist);
-		}
-		return found;
-	}
-
-	// v342：**接触模型形状扫描**（游戏线程，500ms 节流，AddTask 调度）——黑神话级
-	// 变形：按真实模型（鞋/武器）形状盖章，不是固定椭圆。v300 崩溃根因 = 渲染线程
-	// 遍历玩家 3D 树 + 读几何顶点与引擎动画/换装冲突 → 全部移到游戏线程，渲染线程
-	// 盖章/RebuildField 只读缓存（shapeMtx 保护，写 500ms 一次/读每帧一次，无竞争）。
-	void SnowShellMesh::ScanContactShapes()
-	{
-		auto* pc = RE::PlayerCharacter::GetSingleton();
-		if (!pc || !pc->Get3D()) {
-			std::lock_guard<std::mutex> lk(shapeMtx);
-			for (auto& b : bootShape) b.valid = false;
-			weaponShape.valid = false;
-			return;
-		}
-		// 1) 每脚鞋形状（v292 全局启发式 + v342 mask）
-		for (int s = 0; s < 2; ++s) {
-			ShapeStamp sh;
-			RE::NiAVObject* foot = FindNodeByName(pc->Get3D(), s == 0 ? "L Foot" : "R Foot");
-			float fx = 0.0f, fy = 0.0f;
-			if (foot) {
-				const auto* wm = reinterpret_cast<const float*>(
-					reinterpret_cast<std::uintptr_t>(foot) + 0x07C);
-				fx = wm[9];
-				fy = wm[10];
-			}
-			float len = 0.0f, wid = 0.0f, cx = 0.0f, cy = 0.0f, dx = 1.0f, dy = 0.0f;
-			std::string name;
-			std::vector<float> mask;
-			int maskDim = 0;
-			if (FindBootMesh(pc->Get3D(), fx, fy, len, wid, cx, cy, dx, dy, name, mask, maskDim)) {
-				sh.cx = cx;
-				sh.cy = cy;
-				sh.len = len;
-				sh.wid = wid;
-				sh.dirX = dx;
-				sh.dirY = dy;
-				sh.mask = std::move(mask);
-				sh.maskDim = maskDim;
-				sh.maskRes = 2.0f;
-				sh.valid = true;
-				SKSE::log::info("v342: boot[{}] \"{}\" {:.0f}x{:.0f} mask={}x{}", s, name, len, wid, maskDim, maskDim);
-			} else {
-				SKSE::log::info("v342: boot[{}] miss -> ellipse fallback", s);
-			}
-			std::lock_guard<std::mutex> lk(shapeMtx);
-			bootShape[s] = std::move(sh);
-		}
-		// 2) 右手武器形状（细长条：只存 len/wid/中心/朝向，RebuildField 用椭圆近似）
-		{
-			ShapeStamp ws;
-			auto* wpn = pc->GetEquippedObject(false);  // false = 右手（CommonLib 签名 bool a_leftHand）
-			if (wpn && wpn->GetFormType() == RE::FormType::Weapon) {
-				RE::NiAVObject* node = FindNodeByName(pc->Get3D(), "Weapon");
-				RE::NiGeometry* wg = nullptr;
-				if (node && (RTTIIsA(node, "NiTriShape") || RTTIIsA(node, "BSTriShape")))
-					wg = static_cast<RE::NiGeometry*>(node);
-				else if (node) {
-					std::function<void(RE::NiAVObject*)> walk = [&](RE::NiAVObject* n) {
-						if (wg || !n)
-							return;
-						if (RTTIIsA(n, "NiTriShape") || RTTIIsA(n, "BSTriShape")) {
-							wg = static_cast<RE::NiGeometry*>(n);
-							return;
-						}
-						if (auto* nd = As<RE::NiNode>(n, "NiNode"))
-							for (auto& c : nd->GetChildren())
-								if (c)
-									walk(c.get());
-					};
-					walk(node);
-				}
-				if (wg) {
-					auto* data = wg->GetRuntimeData().spModelData.get();
-					if (data && data->vertex && data->GetActiveVertexCount() > 0) {
-						const auto* wm = reinterpret_cast<const float*>(
-							reinterpret_cast<std::uintptr_t>(wg) + 0x07C);
-						const float scl = *reinterpret_cast<const float*>(
-							reinterpret_cast<std::uintptr_t>(wg) + 0x078);
-						const float tx = wm[9], ty = wm[10];
-						float c0x = wm[0], c0y = wm[3], c1x = wm[1], c1y = wm[4];
-						const float l0 = std::sqrt(c0x * c0x + c0y * c0y);
-						const float l1 = std::sqrt(c1x * c1x + c1y * c1y);
-						if (l0 > 0.01f && l1 > 0.01f) {
-							c0x /= l0;
-							c0y /= l0;
-							c1x /= l1;
-							c1y /= l1;
-							float min0 = 1e30f, max0 = -1e30f, min1 = 1e30f, max1 = -1e30f;
-							float sx = 0.0f, sy = 0.0f;
-							const auto* verts = data->vertex;
-							const std::uint32_t vn = data->GetActiveVertexCount();
-							for (std::uint32_t i = 0; i < vn; ++i) {
-								const float lx = verts[i].x * scl, ly = verts[i].y * scl, lz = verts[i].z * scl;
-								const float wx = wm[0] * lx + wm[1] * ly + wm[2] * lz + tx;
-								const float wy = wm[3] * lx + wm[4] * ly + wm[5] * lz + ty;
-								const float p0 = wx * c0x + wy * c0y;
-								const float p1 = wx * c1x + wy * c1y;
-								if (p0 < min0) min0 = p0;
-								if (p0 > max0) max0 = p0;
-								if (p1 < min1) min1 = p1;
-								if (p1 > max1) max1 = p1;
-								sx += wx;
-								sy += wy;
-							}
-							const float len = max0 - min0;
-							const float wid = max1 - min1;
-							// 细长 = 武器（长 30-150 宽 2-22）；太粗是误判（盾/身体）
-							if (len >= 30.0f && len <= 150.0f && wid >= 2.0f && wid <= 22.0f) {
-								ws.cx = sx / static_cast<float>(vn);
-								ws.cy = sy / static_cast<float>(vn);
-								ws.len = len;
-								ws.wid = wid;
-								ws.dirX = c0x;
-								ws.dirY = c0y;
-								ws.valid = true;
-								SKSE::log::info("v342: weapon \"{}\" {:.0f}x{:.0f}", wg->name.c_str(), len, wid);
-							}
-						}
-					}
-				}
-			}
-			std::lock_guard<std::mutex> lk(shapeMtx);
-			weaponShape = std::move(ws);
-		}
-	}
-
-	// v524：**hkpShape 递归求半径（支持 hkpListShape 组合形状——v507-dbg 实锤
-	// boundOk=0：用户武器碰撞体是 ListShape，GetColliderBound 直接 return false →
-	// 武器盖章永不触发"拖拽没有"）**。递归遍历子形状，取最大半径。
+	// 递归遍历子形状，取最大半径（武器 ListShape 展开用）
 	static float GetShapeRadiusRecursive(const RE::hkpShape* shape, float inv)
 	{
 		if (!shape)
@@ -2903,10 +2622,28 @@ namespace SnowDeform
 	// ScanAnimalFeet 每 150ms 检查，死亡 2s 后（ragdoll 落定）取尸体最终位置盖
 	// 浅坑（depth 0.35 → -6.3，浅浅的坑，同法术坑的形状思路）。
 	static std::vector<std::pair<RE::NiPointer<RE::Actor>, unsigned long>> g_corpseQ;  // actor + 死亡时间
+
+	// v589：**每 actor 独立上次位置**（formID -> 位置 + 首见标记）——连续战壕
+	// 需要 prev=上次位置（玩家盖章同款）；v587 的全局 lastAX/lastAY 多 actor
+	// 互相干扰（prev 错位 → 战壕乱连）。v609：从函数内 static 提升为文件级
+	//（ResetForLoadGame 读档时清空——formID 复用会让新 actor 继承旧位置/wasDead，
+	// 误盖坑/战壕错连）。
+	struct LastP {
+		float x = 0.0f, y = 0.0f;
+		bool init = false;
+		bool wasDead = false;  // v590：尸体状态（活体→尸体转变时盖压痕）
+	};
+	static std::unordered_map<std::uint32_t, LastP> lastPos;
+
+	// v592：**尸体压痕（TESDeathEvent 死亡事件版）**——死亡事件在死亡瞬间必触发
 	void SnowShellMesh::OnActorDeath(RE::Actor* a)
 	{
 		if (!a || a == RE::PlayerCharacter::GetSingleton() || a->IsPlayer())
 			return;
+		// v609：**队列上限**——死亡事件突发（群战/屠村）时防无限累积；超 64 丢最老
+		//（老尸体 2s 延迟坑无价值，保留最新响应性）
+		if (g_corpseQ.size() >= 64)
+			g_corpseQ.erase(g_corpseQ.begin());
 		g_corpseQ.emplace_back(RE::NiPointer<RE::Actor>(a), GetTickCount());
 		SKSE::log::info("v597-dbg: death queued={}", a->GetDisplayFullName());
 	}
@@ -2991,15 +2728,6 @@ namespace SnowDeform
 		const unsigned long nowA = GetTickCount();
 		if (nowA - lastAT < 50)
 			return;
-		// v589：**每 actor 独立上次位置**（formID -> 位置 + 首见标记）——连续战壕
-		// 需要 prev=上次位置（玩家盖章同款）；v587 的全局 lastAX/lastAY 多 actor
-		// 互相干扰（prev 错位 → 战壕乱连）。
-		struct LastP {
-			float x = 0.0f, y = 0.0f;
-			bool init = false;
-			bool wasDead = false;  // v590：尸体状态（活体→尸体转变时盖压痕）
-		};
-		static std::unordered_map<std::uint32_t, LastP> lastPos;
 		// v587-dbg：汇总统计（2s 输出一次）
 		static int sDbgStamped = 0, sDbgActors = 0;
 		static unsigned long lastDbgT = 0;
@@ -3871,7 +3599,10 @@ namespace SnowDeform
 		// 仍传（供 ridgeMul 用）。拖痕（shape=11）= 物品同款（v520）。
 		const std::int64_t gxW = static_cast<std::int64_t>(std::floor(hitPos.x / 40.0f));
 		const std::int64_t gyW = static_cast<std::int64_t>(std::floor(hitPos.y / 40.0f));
-		const std::int64_t keyW = (gxW << 32) | (gyW & 0xFFFFFFFFLL);
+		// v609：gxW/gyW 可为负（负坐标），有符号负数左移 = 标准 UB → 先截断为 uint32 再拼
+		const std::int64_t keyW = static_cast<std::int64_t>(
+			(static_cast<std::uint64_t>(static_cast<std::uint32_t>(gxW)) << 32) |
+			static_cast<std::uint32_t>(gyW));
 		auto itW = mineCounts.find(keyW);
 		const int nW = (itW == mineCounts.end()) ? 1 : itW->second + 1;
 		mineCounts[keyW] = nW;
@@ -3979,140 +3710,6 @@ namespace SnowDeform
 		}
 	}
 
-	// v439：**地形碰撞体诊断**——遍历玩家 cell 3D 碰撞体，打印形状类型，确认
-	// 地形碰撞（hkpSampledHeightFieldShape / hkpMoppBvTreeShape）在哪、什么布局，
-	// 为"碰撞跟随下降"（玩家踩坑不悬空）铺路。只读碰撞体（v342b 安全铁律）。
-	void SnowShellMesh::ScanCellCollision()
-	{
-		auto* pc = RE::PlayerCharacter::GetSingleton();
-		if (!pc)
-			return;
-		auto* tes = RE::TES::GetSingleton();
-		auto* cell = tes ? tes->GetCell(pc->GetPosition()) : nullptr;
-		if (!cell)
-			return;
-		RE::NiAVObject* root3D = cell->GetRuntimeData().loadedData ?
-			cell->GetRuntimeData().loadedData->cell3D.get() : nullptr;
-		if (!root3D)
-			return;
-		int count = 0;
-		RE::BSVisit::TraverseScenegraphCollision(root, [&](RE::bhkNiCollisionObject* obj) -> RE::BSVisit::BSVisitControl {
-			RE::bhkRigidBody* rigid = obj->body.get() ? obj->body.get()->AsBhkRigidBody() : nullptr;
-			auto* hkp = rigid ? skyrim_cast<RE::hkpRigidBody*>(rigid->referencedObject.get()) : nullptr;
-			if (hkp) {
-				auto* shape = hkp->collidable.GetShape();
-				const int t = shape ? static_cast<int>(shape->type) : -1;
-				// v439e：**AABB 粗判（radius ~2800 = 地形碰撞体）**——cell 3D 树的
-				// MOPP 里有地形（4096² 覆盖整 cell），GetColliderBound 给中心+半径，
-				// 半径 ≈ 2896（cell 半对角）的就是地形。找到它 → dump 数据布局。
-				RE::NiPoint3 c{ 0.0f, 0.0f, 0.0f };
-				float r = 0.0f;
-				const bool boundOK = GetColliderBound(obj, c, r);
-				SKSE::log::info("v439e-dbg: obj #{} type={} center=({:.0f},{:.0f},{:.0f}) r={:.0f}",
-					count, t, c.x, c.y, c.z, boundOK ? r : -1.0f);
-				count++;
-			}
-			return RE::BSVisit::BSVisitControl::kContinue;
-		});
-		SKSE::log::info("v439-dbg: cell collision scan done ({} objects)", count);
-		// v439b：**射线检测找地形碰撞体（bhkWorld 独立层，不在 cell 3D 树）**——
-		// 玩家位置上方 → 下方打射线，命中地形碰撞体（hkpSampledHeightFieldShape），
-		// dump 布局（分辨率/高度数组指针）。PickObject 是 vtable 槽 33（引擎实现）；
-		// bhkWorld 实例来自玩家 CharController::GetWorldImpl（槽 0F，CommonLib 4.2.0
-		// 无 bhkWorld::GetSingleton，这是唯一入口）。
-		if (auto* ctrl = pc->GetCharController()) {
-			if (auto* world = ctrl->GetWorldImpl()) {
-				const auto pos = pc->GetPosition();
-				// v439d：**三层射线测试（kTerrain/kStatic/kGround）**——v439c 只打
-				// kTerrain 仍 no hit。地形碰撞层不确定，一次测 3 层；同时确认
-				// PickObject（vtable 槽 33）是否真被调用（CommonLib 4.2.0 槽位
-				// 与实际引擎可能不符——若三层全 miss 且日志有"pick called"则槽位
-				// 对但过滤不对；若无"pick called"则槽位错）。
-				const RE::COL_LAYER layers[3] = {
-					RE::COL_LAYER::kTerrain,  // 13
-					RE::COL_LAYER::kStatic,   // 1
-					RE::COL_LAYER::kGround    // 17
-				};
-				const char* layerNames[3] = { "Terrain", "Static", "Ground" };
-				for (int li = 0; li < 3; li++) {
-					RE::bhkPickData pick;
-					pick.rayInput.from = RE::hkVector4{ pos.x, pos.y, pos.z + 1500.0f, 0.0f };
-					pick.rayInput.to = RE::hkVector4{ pos.x, pos.y, pos.z - 1500.0f, 0.0f };
-					pick.rayInput.filterInfo.SetCollisionLayer(layers[li]);
-					SKSE::log::info("v439d-dbg: pick called (layer={})", layerNames[li]);
-					if (world->PickObject(pick) && pick.rayOutput.HasHit()) {
-						const auto* coll = pick.rayOutput.rootCollidable;
-						const auto* shape = coll ? coll->GetShape() : nullptr;
-						const int t = shape ? static_cast<int>(shape->type) : -1;
-						SKSE::log::info("v439d-dbg: HIT layer={} type={}", layerNames[li], t);
-						if (shape && (t == static_cast<int>(RE::hkpShapeType::kSampledHeightField) ||
-								t == static_cast<int>(RE::hkpShapeType::kHeightField))) {
-							const auto* bytes = reinterpret_cast<const std::uint8_t*>(shape);
-							std::string hx;
-							for (int bi = 0; bi < 128; bi += 8) {
-								char buf[32];
-								snprintf(buf, sizeof(buf), "%02X%02X%02X%02X %02X%02X%02X%02X ",
-									bytes[bi], bytes[bi + 1], bytes[bi + 2], bytes[bi + 3],
-									bytes[bi + 4], bytes[bi + 5], bytes[bi + 6], bytes[bi + 7]);
-								hx += buf;
-							}
-							SKSE::log::info("v439d-dbg: hf bytes[0..127]: {}", hx);
-						}
-					} else {
-						SKSE::log::info("v439d-dbg: MISS layer={}", layerNames[li]);
-					}
-				}
-			} else {
-				SKSE::log::info("v439b-dbg: no world");
-			}
-		}  // v439f：闭合 v439b 的 ctrl-if（编辑历史缺括号）
-		// v439f：**broadphase AABB 查询（绕开射线过滤，最后手段）**——地形碰撞体
-		// 不在 cell 3D 树、射线打不到（v439d 三层全 miss）→ 直接查 bhkWorld
-		// broadphase（hkp3AxisSweep）玩家周围 AABB 内所有碰撞体：
-		// handle→ownerOffset 反查 hkpCollidable→shape 类型，找 kSampledHeightField。
-		if (auto* ctrl = pc->GetCharController()) {
-			if (auto* world = ctrl->GetWorldImpl()) {
-				if (auto* hkpWorld = world->GetWorld1()) {
-					if (auto* bp = hkpWorld->broadPhase) {
-						const auto pos = pc->GetPosition();
-						RE::hkAabb aabb;
-						aabb.min = RE::hkVector4{ pos.x - 700.0f, pos.y - 700.0f, pos.z - 900.0f, 0.0f };
-						aabb.max = RE::hkVector4{ pos.x + 700.0f, pos.y + 700.0f, pos.z + 900.0f, 0.0f };
-						// hkpBroadPhaseHandlePair 只有前向声明（CommonLib 缺定义）——
-						// Havok 标准布局 {handle* a, handle* b}，自建同布局结构转换调用
-						struct HandlePair {
-							RE::hkpBroadPhaseHandle* a;
-							RE::hkpBroadPhaseHandle* b;
-						};
-						RE::hkArray<HandlePair> pairs;
-						bp->QuerySingleAabb(aabb,
-							reinterpret_cast<RE::hkArray<RE::hkpBroadPhaseHandlePair>&>(pairs));
-						SKSE::log::info("v439f-dbg: broadphase query -> {} pairs", pairs.size());
-						for (std::int32_t i = 0; i < pairs.size() && i < 60; i++) {
-							auto* h = pairs[i].a;
-							if (!h) {
-								SKSE::log::info("v439f-dbg: pair #{} h=NULL", i);
-								continue;
-							}
-							auto* th = static_cast<RE::hkpTypedBroadPhaseHandle*>(h);
-							RE::hkpCollidable* coll = (th->ownerOffset == RE::hkpTypedBroadPhaseHandle::kInvalidOffset) ?
-								nullptr :
-								reinterpret_cast<RE::hkpCollidable*>(
-									reinterpret_cast<std::uintptr_t>(th) - static_cast<std::uintptr_t>(th->ownerOffset));
-							if (!coll) {
-								SKSE::log::info("v439f-dbg: pair #{} ownerOff={} coll=NULL", i, th->ownerOffset);
-								continue;
-							}
-							auto* shape = coll->GetShape();
-							const int t = shape ? static_cast<int>(shape->type) : -1;
-							SKSE::log::info("v439f-dbg: pair #{} type={}", i, t);
-						}
-					}
-				}
-			}
-		}
-	}
-
 	// v130：渲染线程每帧——对 3×3 cell 全部 landscape geom 顶点做脚印变形
 	// （世界坐标连续场 → 跨 cell/quadrant 边界顶点同步下陷 → 无缝）+ 有变形才
 	// UpdateSubresource 上传。盖章（每 12 单位一个脚印）移出 geom 循环只盖一次；
@@ -4213,162 +3810,6 @@ namespace SnowDeform
 		// 	lastCellScan = now;
 		// 	SKSE::GetTaskInterface()->AddTask([this]() { ScanCellCollision(); });
 		// }
-		auto* pc = RE::PlayerCharacter::GetSingleton();
-		const float yaw = pc ? pc->GetAngle().z * 0.017453292f : 0.0f;  // 度→弧度
-		const unsigned long nowMs = GetTickCount();
-		if (nowMs - footScanLast >= 30) {  // 30ms 节流（落地支撑期 200-400ms，足够捕获）
-			footScanLast = nowMs;
-			if (pc && pc->Get3D()) {
-				for (int s = 0; s < 2; ++s) {
-					const bool isL = (s == 0);
-					RE::NiAVObject* foot = FindNodeByName(pc->Get3D(), isL ? "L Foot" : "R Foot");
-					if (!foot)
-						foot = FindNodeByName(pc->Get3D(), isL ? "NPC L Foot" : "NPC R Foot");
-					if (!foot) {
-						static unsigned long lastFootMiss = 0;
-						static bool treeDumped = false;
-						if (nowMs - lastFootMiss >= 1000) {
-							lastFootMiss = nowMs;
-							SKSE::log::info("v290-dbg: foot={} NOT FOUND", isL ? "L" : "R");
-							if (!treeDumped) {
-								treeDumped = true;
-								// dump 玩家 3D 树节点名（限深度 8 / 80 个）——确认骨骼实际命名
-								int cnt = 0;
-								std::function<void(RE::NiAVObject*, int)> walk = [&](RE::NiAVObject* n, int depth) {
-									if (!n || depth > 8 || cnt >= 80)
-										return;
-									const char* nm = (n->name.size() > 0) ? n->name.c_str() : "(none)";
-									SKSE::log::info("v290-dbg: d{} \"{}\"", depth, nm);
-									cnt++;
-									if (auto* nd = As<RE::NiNode>(n, "NiNode")) {
-										for (auto& c : nd->GetChildren()) {
-											if (c)
-												walk(c.get(), depth + 1);
-										}
-									}
-								};
-								walk(pc->Get3D(), 0);
-								SKSE::log::info("v290-dbg: tree dump done ({} nodes)", cnt);
-							}
-						}
-						continue;
-					}
-					// CommonLib 版本未暴露 worldTransform 成员 → 内存偏移读
-					// （NiAVObject world transform：旋转 @0x07C（3×3 row-major）、
-					// 平移 @0x07C+0x24，v122 验证过）
-					const auto* wm = reinterpret_cast<const float*>(
-						reinterpret_cast<std::uintptr_t>(foot) + 0x07C);
-					const auto* wtf = wm + 9;  // 平移（0x24 = 9 floats 后）
-					float fx = wtf[0], fy = wtf[1];
-					const float fz = wtf[2];
-					// v286：鞋头朝向 = world 矩阵列 0（局部 X 轴世界 xy 方向）
-					float fdx = std::cos(yaw), fdy = std::sin(yaw);
-					const float cx = wm[0], cy = wm[3];
-					const float clen = std::sqrt(cx * cx + cy * cy);
-					if (clen > 0.01f) {
-						fdx = cx / clen;
-						fdy = cy / clen;
-					}
-					// v315：**渲染线程禁止 GetLandHeight**（铁律——引擎函数只能在游戏
-					// 线程；v314 崩实锤：0x37DAB movss [rbp+0xA8] rbp=0 + RAX=TES* =
-					// 落地检测在渲染线程调 GetLandHeight 崩溃）。**改用 playerPos.z
-					// 近似脚下地形高**：玩家 z = 物理地面（基岩地形），脚 z = 基岩+
-					// 雪厚+脚踝 → gap = fz - playerPos.z 与 GetLandHeight 版本等价
-					// （厚雪区 gap≈84 一致），线程安全。
-					const float landH = playerPos.z;
-					const bool hasLand = true;
-					const float gap = fz - landH;
-					if (!prevFootInit[s]) {
-						prevFootZ[s] = fz;
-						prevFootX[s] = fx;
-						prevFootY[s] = fy;
-						prevFootInit[s] = true;
-						continue;
-					}
-					const float dz = fz - prevFootZ[s];
-					const float dxy = std::sqrt((fx - prevFootX[s]) * (fx - prevFootX[s]) +
-						(fy - prevFootY[s]) * (fy - prevFootY[s]));
-					prevFootZ[s] = fz;
-					prevFootX[s] = fx;
-					prevFootY[s] = fy;
-					// 落地 = 接近地面 + z 静止（支撑期）+ 水平钉地（排除摆动最低点）
-					const float pmove = (playerPos.x - lastFootPos.x) * (playerPos.x - lastFootPos.x) +
-						(playerPos.y - lastFootPos.y) * (playerPos.y - lastFootPos.y);
-					// v292：gap<45 → gap<130——数据实锤静止时厚雪区 gap=66~84（GetLandHeight
-					// 返回 LANDSCAPE 基岩高度，不含雪壳；雪壳厚 60+），gap<45 在厚雪区
-					// 永不触发（用户实测只有雪薄处盖章）。落地主要靠 dz/dxy（z 静止 +
-					// 水平钉地 = 支撑期），gap 只做宽松过滤防悬崖/异常。
-					// v341：**pmove 40→10 防延迟**——40 单位=慢走 1 秒+的移动量，玩家
-					// 慢走/起步时脚已落地但 pmove 不达标 → 坑迟迟不出现（用户"有延迟"）。
-					// 落地判定本身靠 dz/dxy（支撑期），pmove 只排除"完全静止站立"，
-					// 10 单位足够；盖章位置 = 脚实际落地点 → 不依赖移动量。
-					if (hasLand && gap < 130.0f && std::fabs(dz) < 2.0f && dxy < 3.0f && pmove > 10.0f * 10.0f) {
-						// v359：**v287 落地盖章禁用**——盖章统一由碰撞体盖章（ScanColliders
-						// 游戏线程内，CS 同款连续轨迹）负责，固定椭圆每步一盖会叠加过密。
-						if (false && nowMs >= footCooldownUntil[s]) {
-							footCooldownUntil[s] = nowMs + 300;  // 去抖：每脚 300ms 内只盖一次
-							// v343：真实脚尺寸（30x14）；v342：加深（重叠越踩越深 0.6→1.5）
-							float bootLen = 30.0f, bootWid = 14.0f;
-							float stCx = fx, stCy = fy;
-							int shapeId = 0;
-							float stampDepth = 0.6f;
-							constexpr float kOverlapR = 55.0f;
-							// v357：**加深修复**——原条件 `f2.depth > stampDepth`：首个脚印
-							// depth=0.6，`0.6 > 0.6` 恒 false → 从无脚印触发加深 → depth 永
-							// 远 0.60（日志 19:48 全 0.60 实锤，"越踩越深"从未生效）。改为
-							// 范围内一律加深（f2.depth+0.12 取 max，v410 cap 1.0 对齐 CS）。
-							for (const auto& f2 : footprints) {
-								const float ddx = f2.x - stCx, ddy = f2.y - stCy;
-								if (ddx * ddx + ddy * ddy < kOverlapR * kOverlapR)
-									stampDepth = std::max(stampDepth, std::min(1.0f, f2.depth + 0.12f));
-							}
-							// 胶囊 prev→curr 连续战壕（v293）；方向 = 移动方向（v341）
-							const float px = stampInited[s] ? lastStampX[s] : stCx;
-							const float py = stampInited[s] ? lastStampY[s] : stCy;
-							float mdx = stCx - px, mdy = stCy - py;
-							const float mlen = std::sqrt(mdx * mdx + mdy * mdy);
-							float sdx_, sdy_;
-							if (mlen > 1.0f) {
-								sdx_ = mdx / mlen;
-								sdy_ = mdy / mlen;
-							} else {
-								sdx_ = fdx;
-								sdy_ = fdy;
-							}
-							footprints.push_back({ stCx, stCy, stampDepth, 0.0f, sdx_, sdy_, bootLen * 0.5f, bootWid * 0.5f, px, py, shapeId, GetTickCount() });  // v554：玩家脚印记录 tMs（按时间回填 600s）
-							gStmpType[0].fetch_add(1, std::memory_order_relaxed);  // v604：玩家盖章计数（渲染线程路径）
-							lastStampX[s] = stCx;
-							lastStampY[s] = stCy;
-							stampInited[s] = true;
-							lastFootPos = playerPos;
-							// v390：512→200——回填 10s 后列表只需近期脚印；上限降防
-							// 原地转圈狂盖章堆满（512 满 = 整条轨迹塌陷，用户"大范围
-							// 凹陷/奇怪东西"实锤）
-							if (footprints.size() > gPlayerFpMax) {  // v573: INI 可调（默认 400，玩家可增——见 LoadConfig）
-								// v553：物品坑独立保护（同玩家脚印处）
-								const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
-									[](const Footprint& f) { return f.shape > 3; });
-								constexpr std::size_t kObjFpMax = 60;  // v605：80→60（动物/尸体脚印上限收紧，fp 442 卡顿修复）
-								if (objCnt > kObjFpMax) {
-									if (auto itE = std::find_if(footprints.begin(), footprints.end(),
-										[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
-										itE != footprints.end())
-										{ itE->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
-								} else {
-									if (auto itP = std::find_if(footprints.begin(), footprints.end(),
-										[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
-										itP != footprints.end())
-										{ itP->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
-									else
-										{ footprints.begin()->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 兜底标记最老淡出）
-								}
-							}
-					landFootDirty.store(true);  // 新脚印 → 本帧全量重算上传
-						}
-					}
-				}
-			}
-		}
 		// v349：**碰撞体盖章禁用**（18:51 崩溃嫌疑 + stamps=0 未生效）——渲染线程遍历
 		// colliders 与游戏线程 move 替换存在迭代器风险；且 v125 stamps=0（盖章从未
 		// 触发，5 碰撞体在扫但位移门 24 未过/首见不盖）。恢复 v287 落地盖章（稳定）。
@@ -4409,27 +3850,14 @@ namespace SnowDeform
 		// v197：无新脚印（且未重建）→ 跳过 13 万顶点全量遍历（帧率恢复）
 		// v551 回退：rf 分离调度"没啥用"（用户实测）——恢复 rf 在 dirty 帧内限频
 		// 150ms 执行（v550b 状态）。
-		// v549：**1s 兜底帧（静息 geom 跳过配套）**——nearFp 空 geom 跳过遍历后，
-		// 物品回填衰减（场每帧变）需要定期全量刷新 → 每 1s 强制一次全量（含
-		// 静息区重算+上传，回填视觉更新）。1 次/s × 10ms ≈ 1% 帧预算。
-		static unsigned long lastFullT = 0;
-		const unsigned long nowF = GetTickCount();
-		// v567（性能修复）：**fullDue 1s 兜底禁用**——原用途是"物品回填衰减（场每帧
-		// 变）每 1s 强制全量刷新"，但回填代码已注释禁用（fp.depth 衰减 + erase，3995
-		// 上方）→ 场不再每帧变化 → fullDue 全量重算结果不变 = 白算（每 1s 一次 10ms
-		// 浪费 + 全量上传可能闪）。禁用后非 dirty 帧完全跳过（land=0）。物品移动
-		// 盖章走 dirty 路径（landFootDirty），不受影响。回填复活时恢复此兜底。
-		const bool fullDue = false;
-		if (fullDue)
-			lastFullT = nowF;
 		// v576（用户"直接改"，2026-08-27）：**去 dirty/RebuildField 双限频，盖章立即重建**——
 		// 原 v564 100ms + v407 150ms 限频：盖章 13/s（v437b 实测）→ 新脚印延迟
 		// 150ms 才出现 = "雪堆突然冒出/一闪一闪"（v575 实锤 fadeMark=0 非驱逐，纯延迟）。
 		// 改盖章帧下一帧立即重建（延迟 1 帧 ≈16ms）→ 新坑紧跟脚出现。成本：重建
-		// 频率 = 盖章频率（≈每 5 帧 1 次），land 平均 ~1-2ms（可接受）。fullDue 1s
-		// 物品兜底保留（v567 禁用 = false 不变）。
+		// 频率 = 盖章频率（≈每 5 帧 1 次），land 平均 ~1-2ms（可接受）。
+		// v609：删 fullDue/lastFullT（v567 恒 false 死逻辑——回填已禁用，场不每帧变）
 		bool dirtyDue = landFootDirty.exchange(false);  // v603：不限频，dirty 帧立即重建
-		if (!dirtyDue && !landRebuildPending.load() && !fullDue)
+		if (!dirtyDue && !landRebuildPending.load())
 			return;
 		// v576：dirtyDue 帧立即重建（30ms 轻限频防盖章高频帧每帧重建）+ 延迟检测
 		// v577：v576 全限频去除后 rf 涨到 12ms（fp 451 时）；门 48 盖章降到 ~7/s，
@@ -4464,29 +3892,8 @@ namespace SnowDeform
 		// 游戏线程**同步 BuildCell 补建**（延迟 1-2 帧 = 人眼无感）→ 玩家脚下永远
 		// 即时 129² → 裂缝在脚下立即消失，不需来回走。同步只补缺失 cell（通常
 		// 0-4 个，15 万顶点插值 ≈ 几 ms），远处仍走分帧队列（v273 512 同步）。
-		// 节流 200ms：引擎持续重建时防每帧刷补建；补建一次 3×3 全齐后不再触发。
-		{
-			static std::uint32_t lastSyncTick = 0;
-			const auto nowSync = GetTickCount();
-			if (nowSync - lastSyncTick > 200) {
-				bool needSync = false;
-				for (int dy2 = -1; dy2 <= 1 && !needSync; dy2++) {
-					for (int dx2 = -1; dx2 <= 1 && !needSync; dx2++) {
-						const int ci2 = (dy2 + 3) * 7 + (dx2 + 3);
-						for (int qd = 0; qd < 4 && !needSync; qd++) {
-							if (cells[ci2][qd].verts != highResDim * highResDim) {
-								needSync = true;
-								break;
-							}
-						}
-					}
-				}
-				if (needSync) {
-					lastSyncTick = nowSync;
-					// v434：同步补建禁用（零替换——Smooth Terrain 129² 直接改顶点）
-				}
-			}
-		}
+		// v609：删 v434 同步补建空块（needSync 只更新 lastSyncTick 无实际动作——
+		// Smooth Terrain 129² 直接改顶点，零替换）
 		std::vector<const Footprint*> nearFp;
 		int totalDeformed = 0;
 		float totalDeepest = 0.0f;  // v214：最深下陷诊断（数据确认坑真实深度）
@@ -4552,10 +3959,11 @@ namespace SnowDeform
 				// 遍历 13 万顶点）**——nearFp 空 = 包围盒内无脚印 → 场值恒 0（脚印影响
 				// 半径 R=56 << halfDiag 粗筛）→ work=orig 无变形 → 跳过变形/ConeCS/沙丘/
 				// 法线/上传。v267 裂缝担忧不成立：近交界脚印必被相邻 geom 包围盒捕获
-				//（都处理 → 场连续一致）；远处脚印场值 0 本就无变形。1s 兜底帧（fullDue）
-				// 强制全量（物品回填衰减更新）；首帧（firstFullUp）不跳过（沙丘基线落
-				// GPU）。玩家附近变形区 nearFp 非空照常处理 → 无"消失又出现"。
-				if (!fullDue && !firstFullUp && nearFp.empty())
+				//（都处理 → 场连续一致）；远处脚印场值 0 本就无变形。首帧（firstFullUp）
+				// 不跳过（沙丘基线落 GPU）。玩家附近变形区 nearFp 非空照常处理 →
+				// 无"消失又出现"。
+				// v609：删 fullDue（恒 false 死逻辑）——条件等价于 !firstFullUp
+				if (!firstFullUp && nearFp.empty())
 					continue;
 				// v132：网格间距感知的有效半径——17×17（289）间距 128、33×33（1089）
 				// 间距 64、65×65（4225）间距 32；低分辨率网格的坑半径放大（≥2×2 顶点）
@@ -4812,6 +4220,10 @@ namespace SnowDeform
 					const auto n = static_cast<int>(std::sqrt(static_cast<double>(vc)) + 0.5);
 					if (n * n == static_cast<int>(vc)) {
 						const float sp2 = 2.0f * (2048.0f / static_cast<float>(n - 1));
+						// v609：**stride 防御门**——法线写 work@20（3B）要求 stride≥23，
+						// 否则越界写坏下一顶点。引擎 LANDSCAPE stride=40 正常，防御引擎
+						// 变体网格（如 LOD 对象 stride 不同）。
+						if (stride < 23) {
 						// v562c：**取消 v562b 两遍平滑（用户"不行，取消这次圆润化"）**——
 						// 恢复 v562 前单遍差分法线（v544j 增强 ×1.35 + v444 软饱和 +
 						// v544c 单侧差分边界 + v544i 边缘 2 圈保留引擎法线）。
@@ -4858,6 +4270,7 @@ namespace SnowDeform
 								nb[1] = static_cast<std::uint8_t>(std::clamp((ny + 1.0f) * 127.0f, 0.0f, 255.0f));
 								nb[2] = static_cast<std::uint8_t>(std::clamp((nz + 1.0f) * 127.0f, 0.0f, 255.0f));
 							}
+						}
 						}
 					}
 				}
@@ -5282,6 +4695,8 @@ namespace SnowDeform
 		}
 		lastObjPos.clear();
 		mineCounts.clear();
+		lastPos.clear();    // v609：读档清空（formID 复用防误盖）
+		g_corpseQ.clear();  // v609：读档清空（防旧尸体 2s 后在新档位置盖坑）
 		deformField.clear();
 		ridgeField.clear();
 		deformFieldObj.clear();  // v529：物体场清空

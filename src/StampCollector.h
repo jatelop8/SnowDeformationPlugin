@@ -32,8 +32,7 @@ namespace SnowDeform
 			float cameraX, float cameraY, float deformWorldSize,
 			StampData* outStamps, StampData* outStampEnds, uint32_t maxStamps);
 
-		// 调试统计
-		uint32_t lastStampCount = 0;
-		static void ClearPrevPositions();  // v569：读档清理胶囊轨迹缓存（static——不碰实例状态）
+		// v569：读档清理胶囊轨迹缓存（static——不碰实例状态）
+		static void ClearPrevPositions();
 	};
 }

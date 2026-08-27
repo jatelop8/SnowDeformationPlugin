@@ -16,11 +16,8 @@
 #include "DeformationMap.h"
 
 #include <d3dcompiler.h>
-#include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <string>
-#include <vector>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3dcompiler.lib")

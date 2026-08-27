@@ -23,9 +23,7 @@
 
 #include <Windows.h>  // VirtualProtect / DWORD（须在 CommonLib 之后）
 
-#include <cstdio>
 #include <cmath>
-#include <thread>
 #include <chrono>
 
 #include "DeformationMap.h"
@@ -33,8 +31,6 @@
 #include "SnowShellMesh.h"
 #include "StampCollector.h"
 #include "CoreAPI.h"  // v543：DS 插件化——DynamicShader Core API（渲染回调/调度/天气）
-
-#include <spdlog/sinks/basic_file_sink.h>
 
 #define DLLEXPORT __declspec(dllexport)
 
@@ -53,9 +49,7 @@ namespace
 		return true;
 	}
 
-	// ---- Present hook：每帧驱动变形图更新 ----
-	using PresentFunc = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
-	PresentFunc g_originalPresent = nullptr;
+	// ---- 变形图更新 ----
 	std::atomic<std::uint32_t> autoCreateAt{0};  // v569：跨线程（渲染线程读 / 游戏线程读档写）改 atomic
 	std::atomic<bool> autoCreateDone{false};        // v449b：提为文件级（读档后可重置）
 
@@ -284,11 +278,13 @@ namespace
 			GetProcAddress(core, "DynamicShader_GetAPI"));
 		if (!getApi) {
 			SKSE::log::error("DynamicSnow: Core GetAPI export missing");
+			FreeLibrary(core);  // v609：失败路径释放句柄（防泄漏）
 			return;
 		}
 		auto* api = getApi(DynamicShader::DS_API_VERSION);
 		if (!api) {
 			SKSE::log::error("DynamicSnow: Core API version mismatch (need {})", DynamicShader::DS_API_VERSION);
+			FreeLibrary(core);  // v609
 			return;
 		}
 		if (api->RegisterRenderCallback(RenderCB, nullptr)) {
@@ -364,6 +360,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	// 按插件名创建 {PluginName}.log 并注册 "global" logger。
 	// 切勿再手动 spdlog::basic_logger_mt("global", ...) —— 与内置 logger 重名，
 	// 注册表冲突抛异常 → 未捕获 → SKSE "fatal error occurred while loading plugin"（实测踩坑）。
+	// v609 注：此 CommonLib 版本 SKSE::Init 返回 void（无失败路径可查）
 	SKSE::Init(a_skse);
 
 	SKSE::log::info("DynamicSnow loaded");
@@ -371,11 +368,6 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 
 	// v573：INI 配置加载（MaxFootprints 玩家可调——雪堆保留量/帧数权衡）
 	SnowDeform::GetSnowShellMesh().LoadConfig();
-
-	// v196：hook 引擎 BuildQuadTriShape 调用点（加载阶段即可——函数地址固定）——
-	// 引擎每次构建/重建 quad 网格时我们立即 setMesh 换成高密度网格（SmoothTerrain
-	// 方式），根治"F9 事后替换只 2 块生效"（引擎渲染管线缓存旧引用）。
-	SnowDeform::GetSnowShellMesh().InstallQuadBuildHook();
 
 	// v592：死亡事件注册（尸体压痕——死亡瞬间在倒下位置盖椭圆压痕）。
 	// ScriptEventSourceHolder 提供 AddEventSink<T> 模板（内部 GetEventSource 转派）
@@ -414,7 +406,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 			msg->type == SKSE::MessagingInterface::kPostLoadGame ||
 			msg->type == SKSE::MessagingInterface::kNewGame ||
 			msg->type == SKSE::MessagingInterface::kDeleteGame) {
-			SKSE::log::info("SnowDeformationPlugin: load event type={}, resetting cache", msg->type);
+			SKSE::log::info("DynamicSnow: load event type={}, resetting cache", msg->type);
 			SnowDeform::StampCollector::ClearPrevPositions();  // v569：读档清胶囊轨迹缓存（旧 formID 复用）
 			SnowDeform::GetSnowShellMesh().ResetForLoadGame();
 			if (msg->type == SKSE::MessagingInterface::kPostLoadGame ||

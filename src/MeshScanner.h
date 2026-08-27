@@ -24,7 +24,6 @@ namespace SnowDeform
 		std::uint32_t  instanceCount = 0;  // 世界内同网格实例数（REF 数）
 		std::uint32_t  geomCount = 0;      // 带 kSnow 的几何节点数
 		std::uint32_t  vertexCount = 0;    // 顶点总数（全部实例）
-		std::uint32_t  triCount = 0;       // 三角形总数
 		bool           hasCpuVertices = false;  // 是否走通 NiGeometryData CPU 顶点路径
 		bool           hasSharedMesh = false;   // 同 NIF 被多个 REF 引用（共享网格）
 		std::string    rttiClasses;             // 观测到的运行时类名（验证类层次）
