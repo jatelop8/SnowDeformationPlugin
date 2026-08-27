@@ -1548,7 +1548,7 @@ namespace SnowDeform
 					{ itO->dieAt = nowDie; gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }
 			}
 			footprints.erase(std::remove_if(footprints.begin(), footprints.end(),
-								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 1200; }),  // v605：2000→1200（驱逐淡出提速，防幽灵堆积撑场）
+								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 1600; }),  // v606：1200→1600（脚印持久些，视觉更好）
 				footprints.end());
 			// v604：**盖章→场重建延迟**（遍历最新 tMs：最后盖章到本次重建，覆盖
 			// 玩家/动物/尸体所有盖章路径，天然无额外原子开销）——量化"移动和雪堆
@@ -1746,7 +1746,7 @@ namespace SnowDeform
 					//（decay 已覆盖全部 d/r 写入：战壕/椭圆/mask/雪堆环）→ 老脚印
 					// 雪堆平滑消失，不再瞬间消失闪（erase 已改淡出标记）。
 					if (fp.dieAt) {
-						const float fade = std::clamp(1.0f - static_cast<float>(GetTickCount() - fp.dieAt) / 1200.0f, 0.0f, 1.0f);  // v605：2000→1200（淡出提速）
+						const float fade = std::clamp(1.0f - static_cast<float>(GetTickCount() - fp.dieAt) / 1600.0f, 0.0f, 1.0f);  // v606：1200→1600（脚印持久）
 						decay *= fade;
 						gFadeCurN.fetch_add(1, std::memory_order_relaxed);                            // v575
 						gFadeSum1000.fetch_add(static_cast<long long>(fade * 1000.0f), std::memory_order_relaxed);  // v575
@@ -3200,6 +3200,17 @@ namespace SnowDeform
 		if (!pc || !pc->Get3D()) {
 			scanning.store(false);
 			return;
+		}
+		// v606：**骑马时跳过玩家盖章（骑马卡顿修复）**——骑马时玩家脚不落地，但
+		// 马移动 → 玩家 position 动 → 玩家碰撞体盖章（85-125/s）+ 马自身 shape=14
+		// 盖章（ForAllActors）双重盖章 → 盖章率爆表 → 每帧重建 → 卡。骑马时玩家
+		// 盖章无意义（马已经盖了轨迹）→ 直接跳过。GetMount 检测骑乘。
+		{
+			RE::NiPointer<RE::Actor> mount;
+			if (pc->GetMount(mount) && mount) {
+				scanning.store(false);
+				return;
+			}
 		}
 		const float groundZ = pc->GetPosition().z;
 		std::unordered_map<std::uint32_t, ColliderStamp> next;
