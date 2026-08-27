@@ -43,6 +43,7 @@
 #include <vector>
 #include <array>
 #include <cmath>
+#include <cstdlib>  // v573：atoi（INI 解析）
 #include <cctype>  // v206：雪分类 tolower
 #include <cstring>
 #include "snow_heights.inc"  // v377: 真实雪粒高度基底（Displacement 高通 256²）
@@ -1429,8 +1430,44 @@ namespace SnowDeform
 	// 连续（不再需要 v265 边缘 5 圈截断）。场覆盖玩家周围 7×7（28672 单位），
 	// 每 32 单位一个采样点（896×896，坑半径 22 覆盖 2 采样点，双线性插值平滑）。
 	// v465-dbg：RebuildField 物品脚印（shape==9）场写入统计（确认物品坑真实进场）
+	// v573（用户"INI 玩家自行控制步数，默认最少"，2026-08-27）：**雪堆/脚印保留上限
+	// 由 DynamicSnow.ini 的 MaxFootprints 控制**（LoadConfig 读取，默认 400）——
+	// v545-perf 实锤 fp>400 后 RebuildField 5ms→10ms 拐点（成本∝脚印数），
+	// 默认 400 = 保留 ~10s 轨迹 + 成本封顶 rf≤~5.5ms；玩家可调大（长轨迹）
+	// 或调小（极致帧数）。范围 100-2000。
+	static std::size_t gPlayerFpMax = 400;
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
+
+	// v573：**INI 配置加载**（游戏线程 SKSEPlugin_Load 调一次）——
+	// Data/SKSE/Plugins/DynamicSnow.ini：
+	//   [General]
+	//   MaxFootprints=400   ; 雪堆/脚印保留上限（默认 400，fp>400 后场重建 5ms→10ms
+	//                        ; 拐点；范围 100-2000，调大=长轨迹更吃帧，调小=更流畅）
+	void SnowShellMesh::LoadConfig()
+	{
+		gPlayerFpMax = 400;  // 默认（性能拐点内）
+		std::ifstream f("Data/SKSE/Plugins/DynamicSnow.ini");
+		if (!f.is_open()) {
+			SKSE::log::info("v573: DynamicSnow.ini not found, MaxFootprints=400 (default)");
+			return;
+		}
+		std::string line;
+		while (std::getline(f, line)) {
+			if (line.find("MaxFootprints") == std::string::npos)
+				continue;
+			const auto eq = line.find('=');
+			if (eq == std::string::npos)
+				continue;
+			const int v = std::atoi(line.c_str() + eq + 1);
+			if (v >= 100 && v <= 2000) {
+				gPlayerFpMax = static_cast<std::size_t>(v);
+				SKSE::log::info("v573: MaxFootprints={} (from ini)", gPlayerFpMax);
+			} else {
+				SKSE::log::warn("v573: MaxFootprints={} out of range [100,2000], using 400", v);
+			}
+		}
+	}
 	void SnowShellMesh::RebuildField()
 	{
 		const int dim = kFieldDim;
@@ -2869,7 +2906,7 @@ namespace SnowDeform
 						// v558~v558p 走路雪尘/烟云/自建颗粒全部删除（火焰验证走通 v558e 后
 						// 各粒子方案效果均不理想：白色粒子雪地隐形、烟云体积难调、静态颗粒
 						// 未验证）。BSTempEffectParticle 链路代码已移除。
-					if (footprints.size() > 1500) {  // v555: 1000->2000（用户画长轨迹保留开头，rf 随 fp 涨的性能代价画图时承受）
+					if (footprints.size() > gPlayerFpMax) {  // v573: INI 可调（默认 400，玩家可增——见 LoadConfig）
 						// v553：**物品坑独立保护（用户"回填消失和时间无关，和长度有关"实锤）**——
 						// 原 v528b 优先删 shape>3（物品坑）→ fp 满 1000 时物品坑被挤掉
 						//（"几秒消失"真相 = 容量 erase 非回填）。改：物品坑独立上限 128
@@ -3147,7 +3184,7 @@ namespace SnowDeform
 						const float pvy = (it->second.stampTime != 0) ? it->second.stampPos.y : position.y;
 						// v477：depth = kObjDepth（0.6，顶点 -10.8 深）
 						footprints.push_back({ position.x, position.y, kObjDepth, 0.0f, 0.0f, 0.0f, sr, sr, pvx, pvy, 9, GetTickCount() });
-						if (footprints.size() > 1500) {  // v555: 1000->2000（用户画长轨迹保留开头，rf 随 fp 涨的性能代价画图时承受）
+						if (footprints.size() > gPlayerFpMax) {  // v573: INI 可调（默认 400，玩家可增——见 LoadConfig）
 							// v553：物品坑独立保护（同玩家脚印处）
 							const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3; });
@@ -3257,7 +3294,7 @@ namespace SnowDeform
 					std::lock_guard<std::mutex> lk(footMtx);
 					// v477：depth = kObjDepth
 						footprints.push_back({ position.x, position.y, kObjDepth, 0.0f, 0.0f, 0.0f, sr, sr, pvx, pvy, 9, GetTickCount() });
-					if (footprints.size() > 1500) {  // v555: 1000->2000（用户画长轨迹保留开头，rf 随 fp 涨的性能代价画图时承受）
+					if (footprints.size() > gPlayerFpMax) {  // v573: INI 可调（默认 400，玩家可增——见 LoadConfig）
 						// v553：物品坑独立保护（同玩家脚印处）
 						const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 							[](const Footprint& f) { return f.shape > 3; });
@@ -3555,7 +3592,7 @@ namespace SnowDeform
 		{
 			std::lock_guard<std::mutex> lk(footMtx);
 			footprints.push_back({ hitPos.x, hitPos.y, pushDepth, 0.0f, 0.0f, 0.0f, pushRL, pushRS, hitPos.x, hitPos.y, wshape, GetTickCount() });
-			if (footprints.size() > 1500) {  // v555: 1000->2000（用户画长轨迹保留开头，rf 随 fp 涨的性能代价画图时承受）
+			if (footprints.size() > gPlayerFpMax) {  // v573: INI 可调（默认 400，玩家可增——见 LoadConfig）
 				// v553：物品坑独立保护（同玩家脚印处）
 				const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 					[](const Footprint& f) { return f.shape > 3; });
@@ -3978,7 +4015,7 @@ namespace SnowDeform
 							// v390：512→200——回填 10s 后列表只需近期脚印；上限降防
 							// 原地转圈狂盖章堆满（512 满 = 整条轨迹塌陷，用户"大范围
 							// 凹陷/奇怪东西"实锤）
-							if (footprints.size() > 1500) {  // v555: 1000->2000（用户画长轨迹保留开头，rf 随 fp 涨的性能代价画图时承受）
+							if (footprints.size() > gPlayerFpMax) {  // v573: INI 可调（默认 400，玩家可增——见 LoadConfig）
 								// v553：物品坑独立保护（同玩家脚印处）
 								const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 									[](const Footprint& f) { return f.shape > 3; });

@@ -41,6 +41,8 @@ namespace SnowDeform
 
 		// 每帧记录玩家位置（Present hook 内调用；与 LANDSCAPE 更新同线程）
 		void UpdatePlayerPos(const RE::NiPoint3& a_pos);
+		// v573：从 Data/SKSE/Plugins/DynamicSnow.ini 读取 MaxFootprints（玩家可调雪堆保留量）
+		void LoadConfig();
 		// 从场景移除并释放
 
 		[[nodiscard]] bool IsValid() const { return root != nullptr; }

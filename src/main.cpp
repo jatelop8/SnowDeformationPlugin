@@ -338,6 +338,9 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	SKSE::log::info("DynamicSnow loaded");
 
 
+	// v573：INI 配置加载（MaxFootprints 玩家可调——雪堆保留量/帧数权衡）
+	SnowDeform::GetSnowShellMesh().LoadConfig();
+
 	// v196：hook 引擎 BuildQuadTriShape 调用点（加载阶段即可——函数地址固定）——
 	// 引擎每次构建/重建 quad 网格时我们立即 setMesh 换成高密度网格（SmoothTerrain
 	// 方式），根治"F9 事后替换只 2 块生效"（引擎渲染管线缓存旧引用）。
