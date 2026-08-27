@@ -1541,14 +1541,14 @@ namespace SnowDeform
 					itP != footprints.end())
 					{ itP->dieAt = nowDie; gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }
 			}
-			if (objAlive > 80) {
+			if (objAlive > 60) {  // v605：80→60（动物/尸体脚印收紧）
 				if (auto itO = std::find_if(footprints.begin(), footprints.end(),
 					[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
 					itO != footprints.end())
 					{ itO->dieAt = nowDie; gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }
 			}
 			footprints.erase(std::remove_if(footprints.begin(), footprints.end(),
-								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 2000; }),
+								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 1200; }),  // v605：2000→1200（驱逐淡出提速，防幽灵堆积撑场）
 				footprints.end());
 			// v604：**盖章→场重建延迟**（遍历最新 tMs：最后盖章到本次重建，覆盖
 			// 玩家/动物/尸体所有盖章路径，天然无额外原子开销）——量化"移动和雪堆
@@ -1746,7 +1746,7 @@ namespace SnowDeform
 					//（decay 已覆盖全部 d/r 写入：战壕/椭圆/mask/雪堆环）→ 老脚印
 					// 雪堆平滑消失，不再瞬间消失闪（erase 已改淡出标记）。
 					if (fp.dieAt) {
-						const float fade = std::clamp(1.0f - static_cast<float>(GetTickCount() - fp.dieAt) / 2000.0f, 0.0f, 1.0f);
+						const float fade = std::clamp(1.0f - static_cast<float>(GetTickCount() - fp.dieAt) / 1200.0f, 0.0f, 1.0f);  // v605：2000→1200（淡出提速）
 						decay *= fade;
 						gFadeCurN.fetch_add(1, std::memory_order_relaxed);                            // v575
 						gFadeSum1000.fetch_add(static_cast<long long>(fade * 1000.0f), std::memory_order_relaxed);  // v575
@@ -3317,7 +3317,7 @@ namespace SnowDeform
 						// 消失）；物品超上限才删最老物品。玩家脚印 1000 上限照常滚动。
 						const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 							[](const Footprint& f) { return f.shape > 3; });
-						constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
+						constexpr std::size_t kObjFpMax = 60;  // v605：80→60（动物/尸体脚印上限收紧，fp 442 卡顿修复）
 						if (objCnt > kObjFpMax) {
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
@@ -3594,7 +3594,7 @@ namespace SnowDeform
 							// v553：物品坑独立保护（同玩家脚印处）
 							const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3; });
-							constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
+							constexpr std::size_t kObjFpMax = 60;  // v605：80→60（动物/尸体脚印上限收紧，fp 442 卡顿修复）
 							if (objCnt > kObjFpMax) {
 								if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 									[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
@@ -3704,7 +3704,7 @@ namespace SnowDeform
 						// v553：物品坑独立保护（同玩家脚印处）
 						const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 							[](const Footprint& f) { return f.shape > 3; });
-						constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
+						constexpr std::size_t kObjFpMax = 60;  // v605：80→60（动物/尸体脚印上限收紧，fp 442 卡顿修复）
 						if (objCnt > kObjFpMax) {
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
@@ -4441,7 +4441,7 @@ namespace SnowDeform
 								// v553：物品坑独立保护（同玩家脚印处）
 								const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 									[](const Footprint& f) { return f.shape > 3; });
-								constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
+								constexpr std::size_t kObjFpMax = 60;  // v605：80→60（动物/尸体脚印上限收紧，fp 442 卡顿修复）
 								if (objCnt > kObjFpMax) {
 									if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 										[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
