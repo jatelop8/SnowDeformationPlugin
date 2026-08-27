@@ -38,6 +38,7 @@
 // v562：v561 贴花 include（BSTempEffectSimpleDecal/BGSTextureSet/NiPlane/TESDataHandler）已移除
 
 #include <fstream>
+#include <algorithm>  // v587：std::sort（最低节点兜底排序）
 #include <filesystem>  // v443：LoadBC4DDS Data 目录拼接
 #include <functional>
 #include <vector>
@@ -2839,6 +2840,21 @@ namespace SnowDeform
 		}
 	}
 
+	// v587：**收集 3D 树全部节点**（最低节点兜底用——骨骼命名未知时取 z 最低节点
+	// 当脚/蹄，任何骨骼通用）
+	static void CollectAllNodes(RE::NiAVObject* a_root, std::vector<RE::NiAVObject*>& a_out)
+	{
+		if (!a_root)
+			return;
+		a_out.push_back(a_root);
+		if (auto* nd = As<RE::NiNode>(a_root, "NiNode")) {
+			for (auto& child : nd->GetChildren()) {
+				if (child)
+					CollectAllNodes(child.get(), a_out);
+			}
+		}
+	}
+
 	void SnowShellMesh::ScanAnimalFeet()
 	{
 		auto* pl = RE::ProcessLists::GetSingleton();
@@ -2849,35 +2865,66 @@ namespace SnowDeform
 		// 全局盖章节流：上次盖章点（多动物场景少见，简单处理）
 		static float lastAX = 0.0f, lastAY = 0.0f;
 		static unsigned long lastAT = 0;
+		// v587：**节流移到调用级（"马匹没效果"根因之一）**——原 v569 把 lastAT 更新放
+		// lambda 内：第一个 actor 处理后 lastAT=nowA → 后续 actor 的 nowA-lastAT<300
+		// 全被跳过 → 每 300ms 只处理 1 个 actor（多动物/NPC 时只有遍历序第一个能盖）。
+		// 移到 ForEachHighActor 外：一次遍历处理全部 actor（4 脚都盖由内部 20 单位
+		// 节流控制）。
+		const unsigned long nowA = GetTickCount();
+		if (nowA - lastAT < 300)
+			return;
+		// v587-dbg：汇总统计（2s 输出一次）
+		static int sDbgStamped = 0, sDbgActors = 0;
+		static unsigned long lastDbgT = 0;
 		pl->ForEachHighActor([&](RE::Actor* a) -> RE::BSContainer::ForEachResult {
 			if (!a || a == pc || a->IsDead())
 				return RE::BSContainer::ForEachResult::kContinue;
-			// 人形排除（有 FaceGenHead = 自定义脸 = NPC/玩家同族）
-			if (a->GetRace() && a->GetRace()->data.flags.any(RE::RACE_DATA::Flag::kFaceGenHead))
-				return RE::BSContainer::ForEachResult::kContinue;
-			// 距离过滤（玩家 300 单位内）
+			// v587：**删人形排除（用户要求 NPC/敌人也盖章）**——v560 的
+			// kFaceGenHead 过滤把所有 NPC/敌人挡掉 = "NPC 没效果"直接原因。
+			// 现在只排除玩家自己与尸体，人形/动物/骑乘全部盖章。
 			const auto ap = a->GetPosition();
-			if ((ap - pp).Length() > 300.0f)
+			// v587：300 → 1000（用户选更大范围）
+			if ((ap - pp).Length() > 1000.0f)
 				return RE::BSContainer::ForEachResult::kContinue;
 			auto* root = a->Get3D(false);
 			if (!root)
 				return RE::BSContainer::ForEachResult::kContinue;
-			// 脚节点收集：Hoof（马/牛）→ Paw（犬/猫）→ Foot（其他动物）
+			// 脚节点收集：Hoof（马/牛）→ Paw（犬/猫）→ Foot（其他）→ 大小写变体
 			std::vector<RE::NiAVObject*> feet;
 			FindAllNodesByName(root, "Hoof", feet);
 			if (feet.empty())
 				FindAllNodesByName(root, "Paw", feet);
 			if (feet.empty())
 				FindAllNodesByName(root, "Foot", feet);
+			if (feet.empty())
+				FindAllNodesByName(root, "hoof", feet);
+			if (feet.empty())
+				FindAllNodesByName(root, "paw", feet);
+			if (feet.empty())
+				FindAllNodesByName(root, "foot", feet);
+			// v587：**最低节点兜底（"马匹没效果"根因之二）**——骨骼节点名若全不
+			// 匹配（马/狼等命名未知）→ 收集全部节点按世界 z 升序取最低 4 个
+			//（站立生物最低节点 = 蹄/爪/脚，通用）；过滤 actor 位置下方 150 内
+			//（排除举起的武器/低垂尾巴等）。
+			if (feet.empty()) {
+				std::vector<RE::NiAVObject*> all;
+				CollectAllNodes(root, all);
+				if (all.size() > 1) {
+					std::sort(all.begin(), all.end(), [&](const RE::NiAVObject* A, const RE::NiAVObject* B) {
+						return A->world.translate.z < B->world.translate.z;
+					});
+					const float footZLim = ap.z + 150.0f;
+					for (auto* n : all) {
+						if (feet.size() >= 4)
+							break;
+						if (n->world.translate.z <= footZLim)
+							feet.push_back(n);
+					}
+				}
+			}
 			if (feet.size() < 2)
 				return RE::BSContainer::ForEachResult::kContinue;  // 无脚/单脚节点跳过
 			// 盖章：每脚（最多 4），脚世界位置，距上次盖章点 > 20 才盖
-			const unsigned long nowA = GetTickCount();
-			// v569：**节流移到调用级**——原 `nowA-lastAT>=300` 在每脚循环内：第一脚
-			// 盖章后 lastAT=nowA → 同次调用后续脚 0<300 永假 → 每调用只盖 1 脚（多动物
-			// 只盖第一个）。调用级节流：整次调用 <300ms 跳过，通过后 4 脚都盖。
-			if (nowA - lastAT < 300)
-				return RE::BSContainer::ForEachResult::kContinue;
 			int stamped = 0;
 			for (auto* fn : feet) {
 				if (stamped >= 4)
@@ -2895,11 +2942,24 @@ namespace SnowDeform
 						shell.landFootDirty.store(true);
 					}
 					stamped++;
+					sDbgStamped++;
 				}
 			}
-			lastAT = nowA;  // v569：调用后更新（同调用内 4 脚都盖）
+			sDbgActors++;
+			// v587-dbg：每 actor 打一行（含名字/脚数/盖章数）——数据驱动确认
+			// 哪些 actor 匹配、盖了多少（首见名字记录，防刷屏靠调用级 300ms 节流）
+			SKSE::log::info("v587-dbg: actor={} feet={} stamped={}", a->GetDisplayFullName(), feet.size(), stamped);
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
+		lastAT = nowA;  // v569/v587：调用后更新（一次遍历盖全部 actor）
+		// v587-dbg：2s 汇总（防多 actor 刷屏）
+		const unsigned long nowDbg = GetTickCount();
+		if (nowDbg - lastDbgT >= 2000) {
+			lastDbgT = nowDbg;
+			SKSE::log::info("v587-dbg: actors2s={} stamped2s={}", sDbgActors, sDbgStamped);
+			sDbgActors = 0;
+			sDbgStamped = 0;
+		}
 	}
 
 	// v562：**脚印贴花全部移除（用户拍板）**——v561 系列（手动构造 BSTempEffectSimpleDecal
