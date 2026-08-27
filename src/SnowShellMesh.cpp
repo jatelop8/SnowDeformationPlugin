@@ -1449,6 +1449,8 @@ namespace SnowDeform
 	static std::atomic<unsigned long> gDirtySetT{ 0 };
 	static std::atomic<long long>     gDelaySum{ 0 }, gDelayN{ 0 };
 	static std::atomic<unsigned long> gDelayMax{ 0 };
+	// v577：盖章间距统计（验证门 48 生效——预期 avg≈48+，之前 ~5）
+	static std::atomic<long long>     gStampGapSum{ 0 }, gStampN{ 0 };
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
 
@@ -2887,7 +2889,13 @@ namespace SnowDeform
 					st.py = st.y;
 				}
 				// v410：门 4→3（CS kStampMovementGate=3 对齐）+ r<=16
-				if (dist > 3.0f && st.radius >= 4.0f && st.radius <= 16.0f) {
+				// v577（用户"走路雪堆突凹闪"，2026-08-27）：**门 3→48**——CS 门 3 为
+				// GPU 纹理盖章设计（廉价）；我们是 CPU 场（kFieldStep=4）+ 顶点变形，
+				// 门 3 导致盖章 13-30/s、间距 3-8 单位 ≈ 场格 4 → 连续盖章落在交替
+				// 场格 → 坑/雪堆位置 4 单位跳动 = "一会突出一会凹下去"闪（v576 延迟
+				// 已修到 12ms 仍闪 = 实锤不是延迟）。门 48 = 间距 ≥12 场格 → 坑清晰
+				// 不重叠（相邻坑边缘相切，胶囊战壕仍连续）。盖章 ~7/s @走路。
+				if (dist > 48.0f && st.radius >= 4.0f && st.radius <= 16.0f) {
 					const float ddx = dx / dist, ddy = dy / dist;
 					// 加深（v357：越踩越深；v410 cap 1.5→1.0 对齐 CS stamp.z 恒 1.0）
 					// v528：**只玩家脚印互相加深（shape<=3）**——原遍历所有 footprints：
@@ -2963,6 +2971,8 @@ namespace SnowDeform
 					}
 					landFootDirty.store(true);
 					gDirtySetT.store(GetTickCount(), std::memory_order_relaxed);  // v576：盖章→重建延迟检测
+					gStampGapSum.fetch_add(static_cast<long long>(dist), std::memory_order_relaxed);  // v577：间距统计
+					gStampN.fetch_add(1, std::memory_order_relaxed);
 					SKSE::log::info("v437b: stamp r={:.1f} at=({:.0f},{:.0f}) depth={:.2f} axis={:.1f}x{:.1f}",
 						st.radius, st.x, st.y, depth, fpRL, fpRS);
 					st.px = st.x;
@@ -4133,11 +4143,18 @@ namespace SnowDeform
 		// 改盖章帧下一帧立即重建（延迟 1 帧 ≈16ms）→ 新坑紧跟脚出现。成本：重建
 		// 频率 = 盖章频率（≈每 5 帧 1 次），land 平均 ~1-2ms（可接受）。fullDue 1s
 		// 物品兜底保留（v567 禁用 = false 不变）。
-		const bool dirtyDue = landFootDirty.exchange(false);
+		bool dirtyDue = landFootDirty.exchange(false);  // v577：非 const（30ms 轻限频可置 false）
 		if (!dirtyDue && !landRebuildPending.load() && !fullDue)
 			return;
-		// v576：dirtyDue 帧立即重建 + 盖章→重建延迟检测
+		// v576：dirtyDue 帧立即重建（30ms 轻限频防盖章高频帧每帧重建）+ 延迟检测
+		// v577：v576 全限频去除后 rf 涨到 12ms（fp 451 时）；门 48 盖章降到 ~7/s，
+		// 30ms 轻限频不拦（间隔 140ms）但兜底盖章异常高频场景。
 		{
+			static unsigned long lastDirtyT = 0;
+			if (dirtyDue && GetTickCount() - lastDirtyT >= 30)
+				lastDirtyT = GetTickCount();
+			else if (dirtyDue)
+				dirtyDue = false;  // 30ms 内重复 dirty → 跳过（下帧再试）
 			if (dirtyDue) {
 				const unsigned long setT = gDirtySetT.load(std::memory_order_relaxed);
 				const unsigned long nowR = GetTickCount();
@@ -4586,6 +4603,13 @@ namespace SnowDeform
 					gDelaySum.store(0, std::memory_order_relaxed);
 					gDelayN.store(0, std::memory_order_relaxed);
 					gDelayMax.store(0, std::memory_order_relaxed);
+					// v577：盖章间距（预期 avg≈48+ = 门生效，坑不重叠不跳）
+					SKSE::log::info("v577-dbg: stamps={}/2s gapAvg={:.0f}",
+						gStampN.load(std::memory_order_relaxed),
+						gStampN.load(std::memory_order_relaxed) > 0 ?
+							static_cast<double>(gStampGapSum.load(std::memory_order_relaxed)) / gStampN.load(std::memory_order_relaxed) : 0.0);
+					gStampGapSum.store(0, std::memory_order_relaxed);
+					gStampN.store(0, std::memory_order_relaxed);
 				}
 				sLdRfUs = sLdVtUs = sLdUpUs = 0;
 				sLdRfMaxUs = sLdVtMaxUs = sLdUpMaxUs = 0;
