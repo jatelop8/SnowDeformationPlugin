@@ -2090,6 +2090,21 @@ namespace SnowDeform
 		// 出小尖峰；CS 深度图有 blur pass 摊平。这里对 deform/ridge 做 1 次轻平滑：
 		// new = 0.5×old + 0.5×(4 邻域均值)——保留峰值（坑深不塌）同时抹平三角尖。
 		// 只做脚印影响边界框（smin..smax），避开全场 320 万格。
+		// v593：**平滑限幅到玩家 ±1024 单位（rf 3ms→68ms 帧数波动修复）**——
+		// 平滑遍历影响框 O(面积)：玩家跑图越广（脚印 600s 半衰散布越远）→ 框
+		// 越大 → 平滑越慢（实测 rf 随跑图 4 分钟从 3ms 单调涨到 68ms 实锤）。
+		// 平滑只在视觉重点区（玩家 ±1024 单位 = 256 格）做，远处脚印的三角尖刺
+		// 玩家看不见，不平滑无妨 → 平滑成本 O(框) → O(256²) 封顶 ~3ms。
+		{
+			const int limX0 = static_cast<int>(std::floor((pos.x - 1024.0f - fieldOriginX) / step));
+			const int limY0 = static_cast<int>(std::floor((pos.y - 1024.0f - fieldOriginY) / step));
+			const int limX1 = static_cast<int>(std::ceil((pos.x + 1024.0f - fieldOriginX) / step));
+			const int limY1 = static_cast<int>(std::ceil((pos.y + 1024.0f - fieldOriginY) / step));
+			sminGx = std::max(sminGx, limX0);
+			sminGy = std::max(sminGy, limY0);
+			smaxGx = std::min(smaxGx, limX1);
+			smaxGy = std::min(smaxGy, limY1);
+		}
 		if (smaxGx >= sminGx && smaxGy >= sminGy) {
 			const int bw = smaxGx - sminGx + 1;
 			const int bh = smaxGy - sminGy + 1;
