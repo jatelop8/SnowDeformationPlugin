@@ -2996,8 +2996,12 @@ namespace SnowDeform
 		// v594：300→150ms（动物/NPC 轨迹更连续——300ms 间隔 + 35 门控慢速动物
 		// 盖不出连续沟壑 = "像一个个小洞"实锤）
 		// v603：150→100ms（用户"延迟太大要精确"——动物/尸体痕迹跟随更及时）
+		// v607：100→50ms（**骑马脚印"都是小坑"修复**）——马走 4m/s → 100ms 只移
+		// 40 单位 < 战壕长轴 60（rA=30×2）→ 战壕段断裂 → 看起来像独立椭圆坑。
+		// 50ms → 段 20 单位 → 战壕首尾相接连续（玩家 20ms 检测连续同理）。盖章
+		// 率 ×2（马/狼 ~40/s obj）→ obj 60 上限 + 驱逐兜底。
 		const unsigned long nowA = GetTickCount();
-		if (nowA - lastAT < 100)
+		if (nowA - lastAT < 50)
 			return;
 		// v589：**每 actor 独立上次位置**（formID -> 位置 + 首见标记）——连续战壕
 		// 需要 prev=上次位置（玩家盖章同款）；v587 的全局 lastAX/lastAY 多 actor
