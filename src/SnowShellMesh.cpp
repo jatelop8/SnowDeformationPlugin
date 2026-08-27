@@ -1460,8 +1460,6 @@ namespace SnowDeform
 	static std::atomic<long long>     gConeN{ 0 };  // v579：ConeCS 削坡执行计数（应 ≈ 盖章帧数）
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
-	static std::atomic<long long> gRebAnimalFoot{ 0 };   // v588：shape=14（NPC/动物）脚印场写入统计
-	static std::atomic<long long> gRebAnimalWrite{ 0 };
 
 	// v573：**INI 配置加载**（游戏线程 SKSEPlugin_Load 调一次）——
 	// Data/SKSE/Plugins/DynamicSnow.ini：
@@ -2073,12 +2071,6 @@ namespace SnowDeform
 						gRebObjFoot.fetch_add(1, std::memory_order_relaxed);
 						if (d > 0.0f || r > 0.0f)
 							gRebObjWrite.fetch_add(1, std::memory_order_relaxed);
-					}
-					// v588-dbg：NPC/动物脚印（shape=14）场写入统计——确认 obj 场真有值
-					if (fp.shape == 14) {
-						gRebAnimalFoot.fetch_add(1, std::memory_order_relaxed);
-						if (d > 0.0f || r > 0.0f)
-							gRebAnimalWrite.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
 			}
@@ -2873,8 +2865,10 @@ namespace SnowDeform
 		const auto pp = pc->GetPosition();
 		static unsigned long lastAT = 0;
 		// v587：节流在调用级（一次遍历盖全部 actor）
+		// v594：300→150ms（动物/NPC 轨迹更连续——300ms 间隔 + 35 门控慢速动物
+		// 盖不出连续沟壑 = "像一个个小洞"实锤）
 		const unsigned long nowA = GetTickCount();
-		if (nowA - lastAT < 300)
+		if (nowA - lastAT < 150)
 			return;
 		// v589：**每 actor 独立上次位置**（formID -> 位置 + 首见标记）——连续战壕
 		// 需要 prev=上次位置（玩家盖章同款）；v587 的全局 lastAX/lastAY 多 actor
@@ -2921,8 +2915,12 @@ namespace SnowDeform
 				return RE::BSContainer::ForEachResult::kContinue;
 			// v587：人形/动物/骑乘全盖（只排除玩家自己）；v590：尸体也盖压痕
 			const auto ap = a->GetPosition();
-			// v587：范围 1000（用户选更大）
-			if ((ap - pp).Length() > 1000.0f)
+			// v587：范围 1000（用户选更大）→ **v594：1000→500（fp 915 卡顿修复）**——
+			// v591 ForAllActors 把玩家周围全部 actor（含远处低优先级生物）纳入盖章 →
+			// 盖章率爆炸（fp 190→915、rf 68ms 实锤）。500 单位 = 视觉重点区（配合
+			// 平滑 ±1024 限幅）；远处生物不盖（玩家看不到）。尸体压痕不依赖遍历
+			//（v592 死亡事件在任何距离都盖）→ 无损失。
+			if ((ap - pp).Length() > 500.0f)
 				return RE::BSContainer::ForEachResult::kContinue;
 			const bool isDead = a->IsDead();
 			auto& lp = lastPos[a->formID];
@@ -2952,9 +2950,12 @@ namespace SnowDeform
 			// 合成 1 条沟壑，与玩家骑马一致）。移动 >20 单位盖（prev=上次位置 →
 			// 连续胶囊战壕，玩家盖章同款逻辑）。
 			// v591：门控 20→35（狼群跑得快盖章密 → rf 22ms 卡顿修复；35 单位间隔
-			// 视觉仍连续，盖章量降 ~40%）
+			// 视觉仍连续，盖章量降 ~40%）→ **v594：35→25（"像一个个小洞"修复）**——
+			// 35 门控 + 150ms 节流：慢速动物/绕圈 AI 每次移动 <35 不盖 → 偶发单点
+			// = 独立小洞。25 门控 + 150ms：慢走（80/s → 12 单位/150ms）也盖 → 段
+			// 首尾相接 → 连续沟壑（同玩家）。
 			const float dx = ap.x - lp.x, dy = ap.y - lp.y;
-			if (dx * dx + dy * dy > 35.0f * 35.0f) {
+			if (dx * dx + dy * dy > 25.0f * 25.0f) {
 				const float px = lp.x, py = lp.y;
 				lp.x = ap.x;
 				lp.y = ap.y;
@@ -2978,7 +2979,7 @@ namespace SnowDeform
 			sDbgActors++;
 			// v589-dbg：每 actor 扫描记录（含移动状态）——数据驱动确认覆盖
 			SKSE::log::info("v589-dbg: actor={} moved={}", a->GetDisplayFullName(),
-				(dx * dx + dy * dy > 35.0f * 35.0f) ? 1 : 0);
+				(dx * dx + dy * dy > 25.0f * 25.0f) ? 1 : 0);
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
 		lastAT = nowA;  // v569/v587：调用后更新（一次遍历盖全部 actor）
@@ -2986,9 +2987,7 @@ namespace SnowDeform
 		const unsigned long nowDbg = GetTickCount();
 		if (nowDbg - lastDbgT >= 2000) {
 			lastDbgT = nowDbg;
-			SKSE::log::info("v589-dbg: actors2s={} stamped2s={} aFoot={} aWrite={}", sDbgActors, sDbgStamped,
-				gRebAnimalFoot.load(std::memory_order_relaxed),
-				gRebAnimalWrite.load(std::memory_order_relaxed));
+			SKSE::log::info("v589-dbg: actors2s={} stamped2s={}", sDbgActors, sDbgStamped);
 			sDbgActors = 0;
 			sDbgStamped = 0;
 		}
@@ -3808,8 +3807,23 @@ namespace SnowDeform
 		const float pushDepth = depth;
 		const float pushRL = 8.0f;
 		const float pushRS = 8.0f;
+		// v594：**武器坑同位置最多 2 下（用户"前面 2 下有效，后面无论多少下取消
+		// 效果，不再挖深"）**——50 单位内已有 ≥2 个武器坑（shape=10）→ 本次跳过
+		// 不盖章。列表项 300s 半衰但保留在列表 → 该位置永久限制（后面怎么打都不
+		// 再加深）。范围 50 = 一次挥击的落点漂移容差。
 		{
 			std::lock_guard<std::mutex> lk(footMtx);
+			int wCnt = 0;
+			for (const auto& f : footprints) {
+				if (f.shape == 10) {
+					const float ddx = f.x - hitPos.x, ddy = f.y - hitPos.y;
+					if (ddx * ddx + ddy * ddy < 50.0f * 50.0f)
+						wCnt++;
+				}
+			}
+			if (wCnt >= 2) {
+				return;  // v594：该位置已挖满 2 下，后续攻击无效（不盖章不重建）
+			}
 			footprints.push_back({ hitPos.x, hitPos.y, pushDepth, 0.0f, 0.0f, 0.0f, pushRL, pushRS, hitPos.x, hitPos.y, wshape, GetTickCount() });
 			if (footprints.size() > gPlayerFpMax) {  // v573: INI 可调（默认 400，玩家可增——见 LoadConfig）
 				// v553：物品坑独立保护（同玩家脚印处）
