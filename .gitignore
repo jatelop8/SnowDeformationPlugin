@@ -1,0 +1,28 @@
+# Build output
+build/
+*.log
+
+# IDE / editor
+.vs/
+.vscode/
+CMakeUserPresets.json
+
+# vcpkg local installs
+vcpkg_installed/
+
+# Debug exports and texture dumps
+debug/
+texdump/
+dist/
+out/
+
+# Compiled artifacts
+*.exe
+*.pdb
+*.obj
+*.ilk
+*.dll
+
+# Python
+__pycache__/
+*.pyc

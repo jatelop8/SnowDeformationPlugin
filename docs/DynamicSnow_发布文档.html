@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DynamicSnow — 动态雪地变形插件</title>
+<style>
+  :root {
+    --bg: #1a1d21; --card: #23272e; --line: #343a45; --text: #d6dbe2;
+    --dim: #8a93a3; --accent: #6ea8ff; --green: #5ec79b; --red: #ff7b72;
+    --yellow: #e3b341;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "Microsoft YaHei", sans-serif; line-height: 1.65; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 30px; font-weight: 700; letter-spacing: .5px; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--dim); margin: 8px 0 32px; font-size: 14px; }
+  h2 { font-size: 20px; margin: 42px 0 14px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 15px; margin: 22px 0 8px; color: var(--green); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; margin: 14px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; }
+  th { background: #2b3038; color: var(--accent); }
+  code { background: #2b3038; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: var(--yellow); }
+  .tag { display: inline-block; background: #2b3a52; color: var(--accent); border-radius: 20px; padding: 2px 12px; font-size: 12px; margin: 0 6px 6px 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; text-align: center; }
+  .stat b { display: block; font-size: 22px; color: var(--green); }
+  .stat small { color: var(--dim); font-size: 12px; }
+  ul { padding-left: 22px; }
+  li { margin: 5px 0; }
+  .note { background: #2b2a24; border: 1px solid #4a4230; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: var(--yellow); margin: 12px 0; }
+  svg { max-width: 100%; height: auto; }
+  .footer { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+  .en { color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1><span>DynamicSnow</span> 动态雪地变形</h1>
+  <div class="sub">SKSE 插件 · 黑神话悟空式真实雪地沟壑 · 与 ENB / Community Shaders 共存 · v1.0 (v563)</div>
+
+  <div class="stats">
+    <div class="stat"><b>130+</b><small>版本迭代</small></div>
+    <div class="stat"><b>~2ms</b><small>平均帧消耗</small></div>
+    <div class="stat"><b>129²</b><small>每 quadrant 顶点</small></div>
+    <div class="stat"><b>300s</b><small>脚印回填周期</small></div>
+  </div>
+
+  <span class="tag">几何变形（非贴花）</span>
+  <span class="tag">玩家脚印战壕</span>
+  <span class="tag">动物脚印</span>
+  <span class="tag">箭矢命中</span>
+  <span class="tag">法术爆炸</span>
+  <span class="tag">雪/沙/泥材质分类</span>
+
+  <h2>功能总览</h2>
+  <div class="card">
+    <table>
+      <tr><th>功能</th><th>说明</th></tr>
+      <tr><td><b>玩家脚印战壕</b></td><td>基于 Havok 碰撞体形状检测，真实鞋形椭圆战壕 + 雪堆环，每 12 单位连续盖章</td></tr>
+      <tr><td><b>动物/马匹脚印</b></td><td>骨骼节点检测（Hoof/Paw/Foot），马 4 蹄 / 狗爪真实足迹</td></tr>
+      <tr><td><b>箭矢命中</b></td><td>Hook 投射物命中回调，箭落点小坑 + 雪堆</td></tr>
+      <tr><td><b>法术爆炸</b></td><td>火球/冰锥命中 → 爆炸坑（-40 深）+ 环形雪堆隆起</td></tr>
+      <tr><td><b>物品盖章 / 拖痕</b></td><td>掉落物压痕、武器拖痕（独立上限保护）</td></tr>
+      <tr><td><b>材质分类</b></td><td>雪 / 沙 / 泥地形自动识别，按地面材质决定是否变形</td></tr>
+      <tr><td><b>时间回填</b></td><td>脚印 300-600s 半衰回填（雪地"恢复"），不是硬删除——防崩溃</td></tr>
+      <tr><td><b>跨 cell 无缝</b></td><td>世界坐标连续场 + 高分辨率网格跟随玩家，无缝衔接无裂缝</td></tr>
+      <tr><td><b>法线重算</b></td><td>变形顶点动态差分法线（增强 1.15 柔和圆润），坑壁立体光照</td></tr>
+    </table>
+  </div>
+
+  <h2>技术架构</h2>
+  <div class="card">
+    <svg viewBox="0 0 900 340" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="#6ea8ff"/>
+        </marker>
+      </defs>
+      <rect x="30" y="30" width="190" height="120" rx="10" fill="#23272e" stroke="#6ea8ff"/>
+      <text x="125" y="58" text-anchor="middle" fill="#6ea8ff" font-size="14" font-weight="bold">检测层（游戏线程）</text>
+      <text x="125" y="82" text-anchor="middle" fill="#d6dbe2" font-size="12">ScanColliders 碰撞体</text>
+      <text x="125" y="102" text-anchor="middle" fill="#d6dbe2" font-size="12">ScanAnimalFeet 骨骼节点</text>
+      <text x="125" y="122" text-anchor="middle" fill="#d6dbe2" font-size="12">Projectile AddImpact hook</text>
+      <text x="125" y="140" text-anchor="middle" fill="#8a93a3" font-size="11">20-100ms 节流调度</text>
+
+      <rect x="360" y="30" width="200" height="120" rx="10" fill="#23272e" stroke="#5ec79b"/>
+      <text x="460" y="58" text-anchor="middle" fill="#5ec79b" font-size="14" font-weight="bold">场系统（双缓冲）</text>
+      <text x="460" y="82" text-anchor="middle" fill="#d6dbe2" font-size="12">footprints 盖章列表</text>
+      <text x="460" y="102" text-anchor="middle" fill="#d6dbe2" font-size="12">deform/ridge 场（世界连续）</text>
+      <text x="460" y="122" text-anchor="middle" fill="#d6dbe2" font-size="12">landBuf[2] 原子切换</text>
+      <text x="460" y="140" text-anchor="middle" fill="#8a93a3" font-size="11">零竞争线程安全</text>
+
+      <rect x="690" y="30" width="190" height="120" rx="10" fill="#23272e" stroke="#e3b341"/>
+      <text x="785" y="58" text-anchor="middle" fill="#e3b341" font-size="14" font-weight="bold">渲染层（渲染线程）</text>
+      <text x="785" y="82" text-anchor="middle" fill="#d6dbe2" font-size="12">UpdateLandscape 每帧</text>
+      <text x="785" y="102" text-anchor="middle" fill="#d6dbe2" font-size="12">顶点 z 下陷 + 法线重算</text>
+      <text x="785" y="122" text-anchor="middle" fill="#d6dbe2" font-size="12">UpdateSubresource 上传</text>
+      <text x="785" y="140" text-anchor="middle" fill="#8a93a3" font-size="11">只传变形区域</text>
+
+      <line x1="222" y1="90" x2="352" y2="90" stroke="#6ea8ff" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="562" y1="90" x2="682" y2="90" stroke="#6ea8ff" stroke-width="2" marker-end="url(#arr)"/>
+
+      <rect x="360" y="200" width="340" height="100" rx="10" fill="#23272e" stroke="#ff7b72"/>
+      <text x="530" y="228" text-anchor="middle" fill="#ff7b72" font-size="14" font-weight="bold">引擎地形（129² 高分辨率网格）</text>
+      <text x="530" y="252" text-anchor="middle" fill="#d6dbe2" font-size="12">Smooth Terrain iSubdivisions=3</text>
+      <text x="530" y="272" text-anchor="middle" fill="#d6dbe2" font-size="12">16 单位顶点间距（细腻战壕下限）</text>
+      <text x="530" y="290" text-anchor="middle" fill="#8a93a3" font-size="11">跨 cell 无缝：世界坐标连续</text>
+
+      <line x1="530" y1="152" x2="530" y2="192" stroke="#5ec79b" stroke-width="2" marker-end="url(#arr)" stroke-dasharray="4 3"/>
+    </svg>
+  </div>
+
+  <h2>性能（实测数据）</h2>
+  <div class="card">
+    <table>
+      <tr><th>指标</th><th>平均</th><th>峰值（盖章瞬间）</th></tr>
+      <tr><td>总帧处理</td><td>1.2 - 3.6 ms</td><td>~38 ms</td></tr>
+      <tr><td>地形处理 land</td><td>1.0 - 3.5 ms</td><td>~35 ms</td></tr>
+      <tr><td>场重建 rf</td><td>1.6 - 3.4 ms</td><td>~12 ms</td></tr>
+      <tr><td>顶点循环 vt</td><td>0.6 - 4.0 ms</td><td>~10 ms</td></tr>
+      <tr><td>GPU 上传 up</td><td>0.04 ms</td><td>0.3 ms</td></tr>
+    </table>
+    <div class="note">实测 276 - 800+ fps（仅插件部分），平均占 60fps 预算的 12-20%。尖峰只出现在盖章瞬间（走路踩下）。</div>
+  </div>
+
+  <h2>版本演进（关键里程碑）</h2>
+  <div class="card">
+    <ul>
+      <li><b>v86-v125</b> — NiTriShape → BSTriShape 渲染路径（rendererData + UpdateSubresource）</li>
+      <li><b>v129-v130</b> — 真地形（LANDSCAPE）变形架构：跨 cell 无缝 + 双缓冲线程安全</li>
+      <li><b>v346</b> — 碰撞体盖章（CS Stamping 移植）：游戏线程扫描 + 盖章同线程零竞争</li>
+      <li><b>v443</b> — Terrain Helper 视差接入（后关闭：ENB wrap 周期物理限制）</li>
+      <li><b>v544i-j</b> — 法线边界连续（深色线修复）+ 动态法线增强</li>
+      <li><b>v545</b> — 性能诊断体系（rf/vt/up 数据驱动优化）</li>
+      <li><b>v559-v560</b> — 箭矢命中 + 法术爆炸 + 动物脚印</li>
+      <li><b>v563</b> — 终版：死代码清理（视差系统移除）、法线柔和微调</li>
+    </ul>
+  </div>
+
+  <h2>前置插件 Requirements</h2>
+  <div class="card">
+    <ul>
+      <li><b>Skyrim Script Extender (SKSE64)</b> — 必需</li>
+      <li><b>Address Library for SKSE Plugins</b> — 必需（All in one / AE 版本匹配）</li>
+      <li><b>Smooth Terrain</b> — 强烈推荐（129² 高分辨率网格，细腻战壕的基石）</li>
+      <li><b>ENB Series 或 Community Shaders</b> — 可选（共存，无强制依赖）</li>
+    </ul>
+  </div>
+
+  <h2>鸣谢 Credits</h2>
+  <div class="card">
+    <ul>
+      <li><b>CommonLibSSE-NG</b> — 引擎 API 封装基础</li>
+      <li><b>SKSE Team / Bethesda</b> — 脚本扩展与游戏本体</li>
+      <li><b>Community Shaders 项目</b> — 地形处理思路参考（Snow Deformation 概念）</li>
+      <li><b>Josef (Skyrim-Community-Shaders)</b> — TerrainData 分类思路</li>
+      <li><b>NearMidnightNow — NMN Dynamic Footprints</b> — 贴花体系与贴图参考</li>
+      <li><b>Hexabit — Footprints</b> — 脚印模组先驱</li>
+      <li><b>NifTools / pynifly / pyffi</b> — NIF 工具链</li>
+      <li><b>eide / Smooth Terrain 作者</b> — 高分辨率地形网格</li>
+    </ul>
+  </div>
+
+  <h2>English Description (Nexus)</h2>
+  <div class="card en">
+    <h3>DynamicSnow — Dynamic Snow Deformation (Geometry)</h3>
+    <p>True geometric snow deformation for Skyrim SE/AE: walking carves real trenches into the landscape mesh (Black Myth Wukong style), compatible with ENB and Community Shaders. Unlike decal-based footprints, every step physically displaces terrain vertices with dynamic normals.</p>
+    <p><b>Features:</b> player boot trenches from Havok collider shapes · horse &amp; animal footprints via skeleton nodes · arrow impacts · spell explosion craters with snow rings · dropped-item imprints · weapon drag marks · snow/sand/mud material detection · 300-600s time-based recovery (no hard deletion, crash-safe) · seamless cross-cell deformation · performance: ~2ms average frame cost.</p>
+    <p><b>Requirements:</b> SKSE64, Address Library (matching your game version). Recommended: Smooth Terrain (iSubdivisions=3) for high-detail 129² grid.</p>
+    <p><b>Credits:</b> CommonLibSSE-NG, SKSE, Community Shaders (Josef), NMN Dynamic Footprints (NearMidnightNow), Hexabit Footprints, NifTools/pynifly, Smooth Terrain.</p>
+  </div>
+
+  <div class="footer">
+    DynamicSnow v1.0 (build v563) · 源码工程：D:\Modding\DynamicShader-DynamicSnow · 备份：D:\workbuddy2\备份\DynamicShader-DynamicSnow_v563_final_20260825.zip
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,52 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 4,
+        "minor": 2,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "common",
+            "hidden": true,
+            "cacheVariables": {
+                "SKSE_SUPPORT_XBYAK": "ON"
+            },
+            "binaryDir": "${sourceDir}/build/${presetName}"
+        },
+        {
+            "name": "no-vcpkg",
+            "hidden": true,
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchain-no-vcpkg.cmake",
+                "COMMONLIB_DIR": "D:/Modding/skyrim-community-shaders-dxr/extern/CommonLibSSE-NG",
+                "VCPKG_PREFIX": "E:/vcpkg-full/installed/x64-windows-static-md",
+                "ENABLE_SKYRIM_SE": "ON",
+                "ENABLE_SKYRIM_AE": "ON",
+                "ENABLE_SKYRIM_VR": "ON"
+            }
+        },
+        {
+            "name": "NINJA",
+            "inherits": [
+                "common",
+                "no-vcpkg"
+            ],
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_MAKE_PROGRAM": "E:/vcpkg-full/downloads/tools/ninja-1.13.2-windows/ninja.exe",
+                "PLUGIN_DEPLOY_DIR": "E:/EJ/mod/mods/DynamicShader-DynamicSnow"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "NINJA",
+            "configurePreset": "NINJA",
+            "targets": [
+                "DynamicSnow"
+            ]
+        }
+    ]
+}

@@ -1,0 +1,42 @@
+# DynamicSnow — Dynamic Snow Deformation (Geometry)
+
+## Description
+True geometric snow deformation for Skyrim SE/AE. Walking carves real trenches into the landscape mesh — Black Myth Wukong style — fully compatible with ENB and Community Shaders. Every step physically displaces terrain vertices (not decals), with dynamic per-vertex normals for realistic trench lighting.
+
+## Features
+- Player boot trenches — real shapes from Havok collider detection (shoe-shaped ellipses), continuous trail at 12-unit steps
+- Horse & animal footprints — skeleton-node detection (Hoof/Paw/Foot): 4-hoof horse prints, dog/wolf paws
+- Arrow impacts — small crater + snow mound at the landing point (projectile hit hook)
+- Spell explosions — fireball/ice spikes blast craters (up to -40 depth) with raised snow rings
+- Dropped-item imprints & weapon drag marks (independent cap protection)
+- Snow / Sand / Mud material detection — deformation only on matching ground
+- Time-based recovery — prints fade back over 300-600s (no hard deletion = crash-safe, no FPS loss from cleanup)
+- Seamless cross-cell deformation — world-space continuous field, no cracks at cell borders
+- Smooth dynamic normals — subtle enhancement (x1.15) for soft rounded mounds
+- Performance — ~2ms average frame cost (measured 276-800+ fps plugin cost; peaks only on stamp frames)
+
+## Requirements
+- Skyrim SE/AE (1.5.97 / 1.6.x)
+- SKSE64 (latest)
+- Address Library for SKSE Plugins (matching game version)
+- Recommended: Smooth Terrain (set iSubdivisions=3, iSmoothedQuads=6) — the 129x129 high-res grid is the foundation of fine trenches
+- Optional: ENB Series or Community Shaders (coexists, no dependency)
+
+## How it works
+The plugin hooks the Havok collider scan (game thread) for footsteps, the skeleton graph for animals, and the projectile impact callback for arrows/spells. Stamps feed a world-space continuous deformation field (double-buffered, lock-free for the render thread). Each frame, terrain quadrant vertices are displaced and normals recomputed, uploaded via UpdateSubresource (only deformed regions).
+
+## Compatibility
+- Works alongside ENB, Community Shaders, DynDOLOD, seasons mods
+- Not a decal mod — no conflicts with footprint decal mods visually, but disable other snow-deformation mods (they would fight over the same landscape vertices)
+
+## Credits
+- CommonLibSSE-NG
+- SKSE Team & Bethesda
+- Community Shaders (Josef) — terrain data & stamping concepts
+- NearMidnightNow — NMN Dynamic Footprints (decal system & texture reference)
+- Hexabit — Footprints (pioneer)
+- NifTools / pynifly / pyffi — NIF toolchain
+- Smooth Terrain author (eide) — high-res terrain grid
+
+## Permissions
+Feel free to use in mod lists. Contact before redistribution of the DLL/source.
