@@ -1518,21 +1518,18 @@ namespace SnowDeform
 		static bool lastHasObj = false;
 		const bool needObjClear = hasObjFp || lastHasObj;
 		lastHasObj = hasObjFp;
-		deformField.assign(static_cast<std::size_t>(dim) * dim, 0.0f);
-		ridgeField.assign(static_cast<std::size_t>(dim) * dim, 0.0f);
-		// v550b：**obj 场确保分配（v550 闪退实锤：needObjClear=false 时跳过 assign
-		// → obj 场空 vector → 平滑写回越界写崩 mov [r11+rdx*4]）**——分配**始终**
+		// v550b：**场分配始终确保（v550 闪退实锤：needObjClear=false 时跳过 assign
+		// → obj 场空 vector → 平滑写回越界写崩 mov [r11+rdx*4]）**——4 场分配**始终**
 		// 确保（size 检查，无条件——持续无 obj 时 obj 场也必须有效分配，采样/写回
-		// 才不越界），清零按条件（fill：本次无 obj 但上次有 → 清残留；持续无 →
-		// 场保持 0 跳过清零省时）。
+		// 才不越界），清零按 v580 增量框（见下）。
+		if (deformField.size() != static_cast<std::size_t>(dim) * dim)
+			deformField.assign(static_cast<std::size_t>(dim) * dim, 0.0f);
+		if (ridgeField.size() != static_cast<std::size_t>(dim) * dim)
+			ridgeField.assign(static_cast<std::size_t>(dim) * dim, 0.0f);
 		if (deformFieldObj.size() != static_cast<std::size_t>(dim) * dim)
 			deformFieldObj.assign(static_cast<std::size_t>(dim) * dim, 0.0f);
 		if (ridgeFieldObj.size() != static_cast<std::size_t>(dim) * dim)
 			ridgeFieldObj.assign(static_cast<std::size_t>(dim) * dim, 0.0f);
-		if (needObjClear) {
-			std::fill(deformFieldObj.begin(), deformFieldObj.end(), 0.0f);
-			std::fill(ridgeFieldObj.begin(), ridgeFieldObj.end(), 0.0f);
-		}
 		const auto player = RE::PlayerCharacter::GetSingleton();
 		if (!player) {
 			fieldReady.store(false);
@@ -1552,10 +1549,79 @@ namespace SnowDeform
 		// v438：**R 96→56（场分辨率 16→8 后控制循环量）**——影响区 (2×56/8)²
 		// = 14²=196 格/脚印；坑 18 + 雪堆 2.2×18≈40 + margin → R=56 覆盖雪堆边缘。
 		const float R = 56.0f;  // 脚印影响半径（坑 + 坑沿雪堆 + margin）
-		// v438：脚印影响边界框（拉普拉斯平滑范围）——遍历脚印时记录所有影响格的
-		// min/max，平滑只做并集框（脚印分散 2600 范围 / 8 = ~325 格宽，325²=10.5
-		// 万格 × 4 邻域 ≈ 95 万次，~1-2ms）。全场 1792² 平滑 3200 万次太贵。
-		int sminGx = dim, sminGy = dim, smaxGx = -1, smaxGy = -1;
+		// v580：**影响框增量清零（帧数优化，用户"继续检测帧数"）**——原全量 assign
+		// 4 场（3584²×4B≈49MB ×4 ≈196MB 清零 ≈ rf 基础 ~6ms，与脚印数无关 = 最大
+		// 浪费）。改：预扫本次影响框（curSmin/curSmax）→ 只清（上次框按场原点位移
+		// 平移 ∪ 本次框）+ 1 格余量。轨迹框（脚印包围盒）通常 < 全场 1% → 基础
+		// 成本 ~6ms → <1ms。安全网：首次（prev 未初始化）/ 传送（位移 > 2048 单位）
+		// → 全量清零兜底。帧间 fieldOrigin 恒 step 整数倍位移（floor 对齐）→
+		// shiftX/Y 用 lround 无损。淡出 erase 的脚印区域由 prev 框平移覆盖。
+		int curSminGx = dim, curSminGy = dim, curSmaxGx = -1, curSmaxGy = -1;
+		{
+			std::lock_guard<std::mutex> lkF01(footMtx);
+			for (const auto& fp : footprints) {
+				const float minX = fp.x - R, maxX = fp.x + R;
+				const float minY = fp.y - R, maxY = fp.y + R;
+				int gx0 = static_cast<int>(std::floor((minX - fieldOriginX) / step));
+				int gy0 = static_cast<int>(std::floor((minY - fieldOriginY) / step));
+				int gx1 = static_cast<int>(std::ceil((maxX - fieldOriginX) / step));
+				int gy1 = static_cast<int>(std::ceil((maxY - fieldOriginY) / step));
+				gx0 = std::max(gx0, 0);
+				gy0 = std::max(gy0, 0);
+				gx1 = std::min(gx1, dim - 1);
+				gy1 = std::min(gy1, dim - 1);
+				if (gx0 < curSminGx) curSminGx = gx0;
+				if (gy0 < curSminGy) curSminGy = gy0;
+				if (gx1 > curSmaxGx) curSmaxGx = gx1;
+				if (gy1 > curSmaxGy) curSmaxGy = gy1;
+			}
+		}
+		const float dOx = fieldOriginX - prevFieldOriginX;
+		const float dOy = fieldOriginY - prevFieldOriginY;
+		const bool teleport = std::abs(dOx) > 2048.0f || std::abs(dOy) > 2048.0f;
+		if (prevSminGx < 0 || teleport) {
+			// 首次 / 传送（场原点跳变）→ 全量清零兜底
+			std::fill(deformField.begin(), deformField.end(), 0.0f);
+			std::fill(ridgeField.begin(), ridgeField.end(), 0.0f);
+			if (needObjClear) {
+				std::fill(deformFieldObj.begin(), deformFieldObj.end(), 0.0f);
+				std::fill(ridgeFieldObj.begin(), ridgeFieldObj.end(), 0.0f);
+			}
+		} else {
+			// 增量：并集（prev 框按位移平移 ∪ cur 框）+ 1 格余量（防平滑邻域越界）
+			const int shiftX = static_cast<int>(std::lround(dOx / step));
+			const int shiftY = static_cast<int>(std::lround(dOy / step));
+			int clrX0 = std::min(curSminGx, prevSminGx + shiftX);
+			int clrY0 = std::min(curSminGy, prevSminGy + shiftY);
+			int clrX1 = std::max(curSmaxGx, prevSmaxGx + shiftX);
+			int clrY1 = std::max(curSmaxGy, prevSmaxGy + shiftY);
+			clrX0 = std::max(clrX0 - 1, 0);
+			clrY0 = std::max(clrY0 - 1, 0);
+			clrX1 = std::min(clrX1 + 1, dim - 1);
+			clrY1 = std::min(clrY1 + 1, dim - 1);
+			for (int gy = clrY0; gy <= clrY1; gy++) {
+				const auto row = static_cast<std::size_t>(gy) * dim;
+				float* df = deformField.data() + row;
+				float* rf = ridgeField.data() + row;
+				std::fill(df + clrX0, df + clrX1 + 1, 0.0f);
+				std::fill(rf + clrX0, rf + clrX1 + 1, 0.0f);
+				if (needObjClear) {
+					float* dfo = deformFieldObj.data() + row;
+					float* rfo = ridgeFieldObj.data() + row;
+					std::fill(dfo + clrX0, dfo + clrX1 + 1, 0.0f);
+					std::fill(rfo + clrX0, rfo + clrX1 + 1, 0.0f);
+				}
+			}
+		}
+		prevSminGx = curSminGx;
+		prevSminGy = curSminGy;
+		prevSmaxGx = curSmaxGx;
+		prevSmaxGy = curSmaxGy;
+		prevFieldOriginX = fieldOriginX;
+		prevFieldOriginY = fieldOriginY;
+		// v438：脚印影响边界框（拉普拉斯平滑范围）——复用预扫 cur 框初始化，
+		// 正式脚印循环内仍 min/max 记录（幂等，双保险）。
+		int sminGx = curSminGx, sminGy = curSminGy, smaxGx = curSmaxGx, smaxGy = curSmaxGy;
 		// v342：鞋底 mask 快照（mutex 读，渲染线程 RebuildField 每帧一次）
 		ShapeStamp shL, shR;
 		{

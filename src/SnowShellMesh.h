@@ -296,6 +296,16 @@ namespace SnowDeform
 		std::vector<float>      ridgeFieldObj;          // v529：物品/拖痕/深坑雪堆
 		float                   fieldOriginX = 0.0f;    // 场原点（对齐 kFieldStep 网格）
 		float                   fieldOriginY = 0.0f;
+		// v580：**影响框增量清零（帧数优化）**——RebuildField 原来每次全量 assign 4 场
+		//（3584²×4B≈49MB ×4 ≈196MB 清零，基础成本 ~6ms 与脚印数无关，rf 最大头）。
+		// 改：只清（上次影响框按玩家位移平移 ∪ 本次影响框），轨迹框通常 < 全场 1%
+		// → rf 基础 ~6ms → <1ms。prev* 未初始化（-1）或玩家位移 > 2048（传送）→
+		// 兜底全量清一次。prev 框平移依据：fieldOrigin 对齐 kFieldStep → 帧间位移恒
+		// step 整数倍 → shiftX/Y 用 lround 无损。淡出 erase 的脚印区域由 prev 框覆盖。
+		int                     prevSminGx = -1, prevSminGy = -1;   // 上次影响框（格索引，-1=未初始化）
+		int                     prevSmaxGx = -1, prevSmaxGy = -1;
+		float                   prevFieldOriginX = 0.0f;           // 上次场原点（算位移平移）
+		float                   prevFieldOriginY = 0.0f;
 		std::atomic<bool>   fieldReady{false};  // v567：跨线程（FindLandscape 游戏线程 false / RebuildField 渲染线程 true）改 atomic
 		void                    RebuildField();         // 清空 + 所有脚印写入（盖章/回填/跨 cell）
 		void                    SampleField(float wx, float wy, float& deformOut, float& ridgeOut) const;
