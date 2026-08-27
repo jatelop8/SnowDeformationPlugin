@@ -4614,8 +4614,23 @@ namespace SnowDeform
 						// v562c：**取消 v562b 两遍平滑（用户"不行，取消这次圆润化"）**——
 						// 恢复 v562 前单遍差分法线（v544j 增强 ×1.35 + v444 软饱和 +
 						// v544c 单侧差分边界 + v544i 边缘 2 圈保留引擎法线）。
-						for (int r = 0; r < n; r++) {
-							for (int c = 0; c < n; c++) {
+						// v582：**法线重算框裁剪（帧数优化，用户"继续检测帧数"）**——
+						// 几何变形只在场框内 → 法线只在框内重算（读邻域 ±1 圈自动扩展
+						// 框外，zAt 越界由单侧差分/kNormEdgeSkip 处理）→ 全 n²（16641
+						// 顶点 ×4 读）→ 框内量（~轨迹带）。框外法线保持前帧值（几何=
+						// 基线不变 → 法线不变，跳过正确；首次 firstFullUp 全量已落基线）。
+						// 顶点 (r,c) 世界坐标 = (tx + c*spacing, ty + r*spacing)。
+						// 框不相交 → 范围倒置 → 循环不执行。fieldBoxValid=false → 全量。
+						int nr0 = 0, nr1 = n - 1, nc0 = 0, nc1 = n - 1;
+						if (fieldBoxValid) {
+							const float spacingN = sp2 * 0.5f;
+							nr0 = std::max(2, static_cast<int>(std::ceil((fieldBoxMinY - ty) / spacingN)));
+							nr1 = std::min(n - 3, static_cast<int>(std::floor((fieldBoxMaxY - ty) / spacingN)));
+							nc0 = std::max(2, static_cast<int>(std::ceil((fieldBoxMinX - tx) / spacingN)));
+							nc1 = std::min(n - 3, static_cast<int>(std::floor((fieldBoxMaxX - tx) / spacingN)));
+						}
+						for (int r = nr0; r <= nr1; r++) {
+							for (int c = nc0; c <= nc1; c++) {
 								constexpr int kNormEdgeSkip = 2;  // v544l：3→2 与淡出匹配
 								if (r < kNormEdgeSkip || r >= n - kNormEdgeSkip ||
 									c < kNormEdgeSkip || c >= n - kNormEdgeSkip)
