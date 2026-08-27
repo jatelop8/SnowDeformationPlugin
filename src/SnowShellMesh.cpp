@@ -1619,6 +1619,19 @@ namespace SnowDeform
 		prevSmaxGy = curSmaxGy;
 		prevFieldOriginX = fieldOriginX;
 		prevFieldOriginY = fieldOriginY;
+		// v581：**影响框世界坐标（顶点循环框剔除用）**——框 = 预扫 curSmin/curSmax
+		//（含脚印影响半径 R）→ 场只在框内非零 → 框外顶点跳过场采样/变形/ConeCS。
+		// 无脚印（预扫哨兵）→ valid=false → 各循环走全量（安全兜底，理论不发生：
+		// RebuildField 只在 dirty 帧调用，dirty 必有脚印）。
+		if (curSminGx <= curSmaxGx && curSminGy <= curSmaxGy) {
+			fieldBoxMinX = fieldOriginX + static_cast<float>(curSminGx) * step;
+			fieldBoxMaxX = fieldOriginX + static_cast<float>(curSmaxGx + 1) * step;
+			fieldBoxMinY = fieldOriginY + static_cast<float>(curSminGy) * step;
+			fieldBoxMaxY = fieldOriginY + static_cast<float>(curSmaxGy) * step;
+			fieldBoxValid = true;
+		} else {
+			fieldBoxValid = false;
+		}
 		// v438：脚印影响边界框（拉普拉斯平滑范围）——复用预扫 cur 框初始化，
 		// 正式脚印循环内仍 min/max 记录（幂等，双保险）。
 		int sminGx = curSminGx, sminGy = curSminGy, smaxGx = curSmaxGx, smaxGy = curSmaxGy;
@@ -4384,6 +4397,24 @@ namespace SnowDeform
 						}
 					}
 				}
+				// v581：**场框剔除（帧数优化，用户"继续检测帧数"）**——v580 影响框外
+				// 场值恒 0（无坑无雪堆）→ 跳过场采样/obj 采样/合成，直接写基线：
+				// origZ + 场景雪堆 + 静态沙丘（UndulationXY 世界锚定，值恒定）→
+				// 顶点遍历量 ~76 万 → 框内 1-5 万。首帧（firstFullUp）全量不跳
+				//（沙丘基线落 GPU）；无脚印（fieldBoxValid=false）不跳（走原路径）。
+				// 沙丘在此写入后，下方沙丘循环跳过框外（每顶点恰一次沙丘，无双写）。
+				if (fieldBoxValid && !firstFullUp) {
+					const bool inBox = wx >= fieldBoxMinX && wx <= fieldBoxMaxX &&
+									   wy >= fieldBoxMinY && wy <= fieldBoxMaxY;
+					if (!inBox) {
+						float lift2 = 0.0f;
+						SampleSceneLift(wx, wy, lift2);
+						const float rem2 = 24.0f + lift2;
+						const float sc2 = std::clamp(rem2 / 8.0f, 0.0f, 1.0f);
+						pos[2] = origZ + lift2 + UndulationXY(wx, wy) * sc2;
+						continue;
+					}
+				}
 				// v266：**变形场采样**——所有网格（129² + 引擎 289/65²）从同一张
 				// 世界坐标变形场取 deform/ridge（用户方案"边界顶点链接一起变形"）：
 				// 相邻 cell 边界顶点（同一世界位置）采样同一场 → 变形量必然一致 →
@@ -4472,9 +4503,22 @@ namespace SnowDeform
 						return *reinterpret_cast<const float*>(
 							lc.work.data() + static_cast<std::size_t>(r * n + c) * stride + 8);
 					};
+					// v581：**ConeCS 写范围裁剪到场框（帧数优化）**——框外无坑无雪堆
+					// → 削坡恒无变化（h==zCur==基线）→ 跳过写。邻域读（coneStep≤4 →
+					// ±16 格）自动扩展到框外（coneZAt 越界 clamp 已处理），削坡结果
+					// 不受裁剪影响。顶点 (r,c) 世界坐标 = (tx + c*spacing, ty + r*spacing)
+					// → r = (wy - ty)/spacing，c = (wx - tx)/spacing。框不相交 → 范围
+					// 倒置 → 循环不执行。
+					int rStart = 0, rEnd = n - 1, cStart = 0, cEnd = n - 1;
+					if (fieldBoxValid) {
+						rStart = std::max(0, static_cast<int>(std::ceil((fieldBoxMinY - ty) / spacing)));
+						rEnd = std::min(n - 1, static_cast<int>(std::floor((fieldBoxMaxY - ty) / spacing)));
+						cStart = std::max(0, static_cast<int>(std::ceil((fieldBoxMinX - tx) / spacing)));
+						cEnd = std::min(n - 1, static_cast<int>(std::floor((fieldBoxMaxX - tx) / spacing)));
+					}
 					for (int coneStep : kConeSteps) {
-						for (int r = 0; r < n; r++) {
-							for (int c = 0; c < n; c++) {
+						for (int r = rStart; r <= rEnd; r++) {
+							for (int c = cStart; c <= cEnd; c++) {
 								auto* p = reinterpret_cast<float*>(
 									lc.work.data() + static_cast<std::size_t>(r * n + c) * stride + 8);
 								const float zCur = *p;  // 合成后值（下陷或隆起）
@@ -4520,6 +4564,15 @@ namespace SnowDeform
 						constexpr int kEdgeSkip2 = 2;  // v544l：3→2 与淡出匹配
 						if (rr2 < kEdgeSkip2 || rr2 >= nn2 - kEdgeSkip2 ||
 							cc2 < kEdgeSkip2 || cc2 >= nn2 - kEdgeSkip2)
+							continue;
+					}
+					// v581：**沙丘框剔除（帧数优化）**——框外顶点主循环已写基线
+					//（origZ + sceneLift + 沙丘，UndulationXY 世界锚定值恒定）→ 沙丘
+					// 循环跳过框外，避免重复计算（框内顶点主循环不含沙丘 → 每顶点
+					// 恰一次沙丘，无双写）。首帧（firstFullUp）全量不跳（基线落 GPU）。
+					if (fieldBoxValid && !firstFullUp) {
+						if (wx2 < fieldBoxMinX || wx2 > fieldBoxMaxX ||
+							wy2 < fieldBoxMinY || wy2 > fieldBoxMaxY)
 							continue;
 					}
 					const float remaining = 24.0f + (pos2[2] - origZ2);

@@ -306,6 +306,12 @@ namespace SnowDeform
 		int                     prevSmaxGx = -1, prevSmaxGy = -1;
 		float                   prevFieldOriginX = 0.0f;           // 上次场原点（算位移平移）
 		float                   prevFieldOriginY = 0.0f;
+		// v581：**影响框世界坐标（顶点循环框剔除，帧数优化）**——RebuildField 预扫
+		// 结果转世界坐标存成员，UpdateLandscape 顶点循环/ConeCS/沙丘只处理框内
+		//（框外场值恒 0，无坑无雪堆，跳过采样与削坡；首帧 firstFullUp 全量不跳）。
+		float                   fieldBoxMinX = 0.0f, fieldBoxMaxX = 0.0f;
+		float                   fieldBoxMinY = 0.0f, fieldBoxMaxY = 0.0f;
+		bool                    fieldBoxValid = false;             // false=无脚印 → 各循环全量（安全）
 		std::atomic<bool>   fieldReady{false};  // v567：跨线程（FindLandscape 游戏线程 false / RebuildField 渲染线程 true）改 atomic
 		void                    RebuildField();         // 清空 + 所有脚印写入（盖章/回填/跨 cell）
 		void                    SampleField(float wx, float wy, float& deformOut, float& ridgeOut) const;
