@@ -1701,7 +1701,12 @@ namespace SnowDeform
 						// 物品/武器坑（shape>3）300s 半衰不变。
 						const float age = static_cast<float>(GetTickCount() - fp.tMs) / 1000.0f;
 						if (age > 0.0f) {
-							const float halfLife = (fp.shape <= 3) ? 600.0f : 300.0f;
+							// v591：**动物/NPC 脚印（shape=14）半衰 300→30s（狼群卡顿
+							// 修复）**——狼群盖章多 + 300s 半衰 → obj 场堆积 + 影响框
+							// 膨胀（拉普拉斯平滑/清零/顶点遍历全爆炸，rf 2ms→22ms
+							// 实锤）。30s 半衰：狼群走过的痕迹 ~1 分钟内变浅消失 →
+							// 场框自动收缩 → rf 恢复。玩家 600s / 物品武器 300s 不变。
+							const float halfLife = (fp.shape <= 3) ? 600.0f : ((fp.shape == 14) ? 30.0f : 300.0f);
 							decay = std::exp(-age / halfLife);
 						}
 					}
@@ -2862,7 +2867,11 @@ namespace SnowDeform
 					std::sqrt(dPx * dPx + dPy * dPy));
 			}
 		};
-		pl->ForEachHighActor([&](RE::Actor* a) -> RE::BSContainer::ForEachResult {
+		// v591：**ForEachHighActor → ForAllActors（尸体压痕修复）**——ForEachHighActor
+		// 只遍历高优先级活动 actor，**尸体被降级移出 high list** → v590 的
+		// stampCorpse 从未触发（v590-dbg corpse=0 实锤）。ForAllActors 遍历 process
+		// list 全部 actor（含尸体/低优先级），1000 单位过滤在内部 → 覆盖尸体。
+		pl->ForAllActors([&](RE::Actor* a) -> RE::BSContainer::ForEachResult {
 			if (!a || a == pc)
 				return RE::BSContainer::ForEachResult::kContinue;
 			// v587：人形/动物/骑乘全盖（只排除玩家自己）；v590：尸体也盖压痕
@@ -2897,8 +2906,10 @@ namespace SnowDeform
 			// 骑马时候的雪沟壑一样"：actor 位置连续轨迹 → 玩家同款战壕（马 4 蹄
 			// 合成 1 条沟壑，与玩家骑马一致）。移动 >20 单位盖（prev=上次位置 →
 			// 连续胶囊战壕，玩家盖章同款逻辑）。
+			// v591：门控 20→35（狼群跑得快盖章密 → rf 22ms 卡顿修复；35 单位间隔
+			// 视觉仍连续，盖章量降 ~40%）
 			const float dx = ap.x - lp.x, dy = ap.y - lp.y;
-			if (dx * dx + dy * dy > 20.0f * 20.0f) {
+			if (dx * dx + dy * dy > 35.0f * 35.0f) {
 				const float px = lp.x, py = lp.y;
 				lp.x = ap.x;
 				lp.y = ap.y;
@@ -2922,7 +2933,7 @@ namespace SnowDeform
 			sDbgActors++;
 			// v589-dbg：每 actor 扫描记录（含移动状态）——数据驱动确认覆盖
 			SKSE::log::info("v589-dbg: actor={} moved={}", a->GetDisplayFullName(),
-				(dx * dx + dy * dy > 400.0f) ? 1 : 0);
+				(dx * dx + dy * dy > 35.0f * 35.0f) ? 1 : 0);
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
 		lastAT = nowA;  // v569/v587：调用后更新（一次遍历盖全部 actor）
@@ -3074,7 +3085,7 @@ namespace SnowDeform
 						// 消失）；物品超上限才删最老物品。玩家脚印 1000 上限照常滚动。
 						const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 							[](const Footprint& f) { return f.shape > 3; });
-						constexpr std::size_t kObjFpMax = 128;
+						constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
 						if (objCnt > kObjFpMax) {
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
@@ -3351,7 +3362,7 @@ namespace SnowDeform
 							// v553：物品坑独立保护（同玩家脚印处）
 							const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3; });
-							constexpr std::size_t kObjFpMax = 128;
+							constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
 							if (objCnt > kObjFpMax) {
 								if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 									[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
@@ -3461,7 +3472,7 @@ namespace SnowDeform
 						// v553：物品坑独立保护（同玩家脚印处）
 						const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 							[](const Footprint& f) { return f.shape > 3; });
-						constexpr std::size_t kObjFpMax = 128;
+						constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
 						if (objCnt > kObjFpMax) {
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
@@ -4182,7 +4193,7 @@ namespace SnowDeform
 								// v553：物品坑独立保护（同玩家脚印处）
 								const std::size_t objCnt = std::count_if(footprints.begin(), footprints.end(),
 									[](const Footprint& f) { return f.shape > 3; });
-								constexpr std::size_t kObjFpMax = 128;
+								constexpr std::size_t kObjFpMax = 80;  // v591：128→80（狼群快速驱逐，场框受控）
 								if (objCnt > kObjFpMax) {
 									if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 										[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
