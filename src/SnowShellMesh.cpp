@@ -1451,6 +1451,11 @@ namespace SnowDeform
 	static std::atomic<unsigned long> gDelayMax{ 0 };
 	// v577：盖章间距统计（验证门 48 生效——预期 avg≈48+，之前 ~5）
 	static std::atomic<long long>     gStampGapSum{ 0 }, gStampN{ 0 };
+	// v578（用户"没有用接着改"，2026-08-27）：**geom 失效计数**——SafeGeomValid
+	// 失败 = 引擎 LOD 重建了 LANDSCAPE geom（vertexCount 变化/对象替换）→ 缓存
+	// 失效 → 顶点循环跳过 → 雪堆消失 → 重缓存（800ms 节流）才恢复 = "走路时
+	// 雪堆凹下去又突出来"的候选根因（盖章密度/延迟/驱逐已全部数据排除）。
+	static std::atomic<long long>     gGeomInvalidN{ 0 };
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
 
@@ -4538,6 +4543,7 @@ namespace SnowDeform
 				// SafeUpload 保护 UpdateSubresource（崩溃日志实锤 nvwgf2umx rep movsb）
 				std::uint32_t curVc = 0;
 				if (!lc.geom || !SafeGeomValid(lc.geom, vc, curVc)) {
+					gGeomInvalidN.fetch_add(1, std::memory_order_relaxed);  // v578：引擎重建计数
 					lc.geom = nullptr;  // 引擎重建 → 本缓存失效（下轮重缓存补）
 					continue;
 				}
@@ -4610,6 +4616,9 @@ namespace SnowDeform
 							static_cast<double>(gStampGapSum.load(std::memory_order_relaxed)) / gStampN.load(std::memory_order_relaxed) : 0.0);
 					gStampGapSum.store(0, std::memory_order_relaxed);
 					gStampN.store(0, std::memory_order_relaxed);
+					// v578：geom 失效数（>0 = 引擎重建发生 → 雪堆消失/恢复周期）
+					SKSE::log::info("v578-dbg: geomInvalid={}/2s", gGeomInvalidN.load(std::memory_order_relaxed));
+					gGeomInvalidN.store(0, std::memory_order_relaxed);
 				}
 				sLdRfUs = sLdVtUs = sLdUpUs = 0;
 				sLdRfMaxUs = sLdVtMaxUs = sLdUpMaxUs = 0;
