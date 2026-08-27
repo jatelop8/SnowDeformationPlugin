@@ -1475,6 +1475,15 @@ namespace SnowDeform
 		// = 4 场 assign 20MB + 脚印循环）**——物品/武器脚印（shape>3）不存在时 obj
 		// 场恒 0，跳过 assign（省一半内存带宽）。上次有本次无 → 清一次残留（场归 0）。
 		// 玩家脚印为主（无物品滚动/武器敲击）时 rf 显著下降；有物品时行为不变。
+		// v574：**清理淡出完成**（dieAt 标记后 2s 渐隐结束 → 真正删除）——
+		// 淡出期间脚印保留在列表（场写入乘 fade 渐隐），完成后 remove_if 清除。
+		{
+			std::lock_guard<std::mutex> lkF03(footMtx);
+			const unsigned long nowDie = GetTickCount();
+			footprints.erase(std::remove_if(footprints.begin(), footprints.end(),
+								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 2000; }),
+				footprints.end());
+		}
 		bool hasObjFp = false;
 		{
 			std::lock_guard<std::mutex> lkF00(footMtx);
@@ -1571,6 +1580,13 @@ namespace SnowDeform
 					//（同一段代码 = 分毫不差，物理上不可能有差异）。回填衰减在下方
 					// 统一处理（shape==9 时 depth 乘 decay，玩家 tMs=0 不衰减）。
 					float decay = 1.0f;
+					// v574：**淡出渐隐**——dieAt 标记后 2s 线性 fade→0，乘入 decay
+					//（decay 已覆盖全部 d/r 写入：战壕/椭圆/mask/雪堆环）→ 老脚印
+					// 雪堆平滑消失，不再瞬间消失闪（erase 已改淡出标记）。
+					if (fp.dieAt) {
+						const float fade = std::clamp(1.0f - static_cast<float>(GetTickCount() - fp.dieAt) / 2000.0f, 0.0f, 1.0f);
+						decay *= fade;
+					}
 					if (fp.tMs != 0) {
 						// v554：**玩家脚印也按时间回填（用户"玩家脚印也是啊"实锤）**——
 						// 玩家脚印原来 tMs=0 永久 + fp>1000 erase 删最老 → 走路 40/s
@@ -2917,16 +2933,16 @@ namespace SnowDeform
 						constexpr std::size_t kObjFpMax = 128;
 						if (objCnt > kObjFpMax) {
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
-								[](const Footprint& f) { return f.shape > 3; });
+								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
 								itE != footprints.end())
-								footprints.erase(itE);
+								itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 						} else {
 							if (auto itP = std::find_if(footprints.begin(), footprints.end(),
-								[](const Footprint& f) { return f.shape <= 3; });
+								[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 								itP != footprints.end())
-								footprints.erase(itP);
+								itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 							else
-								footprints.erase(footprints.begin());
+								footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
 						}
 					}
 					}
@@ -3191,16 +3207,16 @@ namespace SnowDeform
 							constexpr std::size_t kObjFpMax = 128;
 							if (objCnt > kObjFpMax) {
 								if (auto itE = std::find_if(footprints.begin(), footprints.end(),
-									[](const Footprint& f) { return f.shape > 3; });
+									[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
 									itE != footprints.end())
-									footprints.erase(itE);
+									itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 							} else {
 								if (auto itP = std::find_if(footprints.begin(), footprints.end(),
-									[](const Footprint& f) { return f.shape <= 3; });
+									[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 									itP != footprints.end())
-									footprints.erase(itP);
+									itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 								else
-									footprints.erase(footprints.begin());
+									footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
 							}
 						}
 						lastR = sr;
@@ -3301,16 +3317,16 @@ namespace SnowDeform
 						constexpr std::size_t kObjFpMax = 128;
 						if (objCnt > kObjFpMax) {
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
-								[](const Footprint& f) { return f.shape > 3; });
+								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
 								itE != footprints.end())
-								footprints.erase(itE);
+								itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 						} else {
 							if (auto itP = std::find_if(footprints.begin(), footprints.end(),
-								[](const Footprint& f) { return f.shape <= 3; });
+								[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 								itP != footprints.end())
-								footprints.erase(itP);
+								itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 							else
-								footprints.erase(footprints.begin());
+								footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
 						}
 					}
 					landFootDirty.store(true);
@@ -3599,16 +3615,16 @@ namespace SnowDeform
 				constexpr std::size_t kObjFpMax = 128;
 				if (objCnt > kObjFpMax) {
 					if (auto itE = std::find_if(footprints.begin(), footprints.end(),
-						[](const Footprint& f) { return f.shape > 3; });
+						[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
 						itE != footprints.end())
-						footprints.erase(itE);
+						itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 				} else {
 					if (auto itP = std::find_if(footprints.begin(), footprints.end(),
-						[](const Footprint& f) { return f.shape <= 3; });
+						[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });  // v574：跳过淡出中
 						itP != footprints.end())
-						footprints.erase(itP);
+						itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 					else
-						footprints.erase(footprints.begin());
+						footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
 				}
 			}
 		}
@@ -4022,16 +4038,16 @@ namespace SnowDeform
 								constexpr std::size_t kObjFpMax = 128;
 								if (objCnt > kObjFpMax) {
 									if (auto itE = std::find_if(footprints.begin(), footprints.end(),
-										[](const Footprint& f) { return f.shape > 3; });
+										[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
 										itE != footprints.end())
-										footprints.erase(itE);
+										itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 								} else {
 									if (auto itP = std::find_if(footprints.begin(), footprints.end(),
-										[](const Footprint& f) { return f.shape <= 3; });
+										[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 										itP != footprints.end())
-										footprints.erase(itP);
+										itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
 									else
-										footprints.erase(footprints.begin());
+										footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
 								}
 							}
 					landFootDirty.store(true);  // 新脚印 → 本帧全量重算上传

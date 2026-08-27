@@ -129,7 +129,7 @@ namespace SnowDeform
 
 		// v74：踩雪变形（CPU 脚印）；v121：水平坐标 = x/y（Skyrim Z 是高度）
 		// v483b：+tMs（盖章时间戳，物品回填衰减用——雪被压后随时间恢复）
-		struct Footprint { float x, y, depth, radius; float dirX, dirY, rL, rS; float prevX, prevY; int shape = 0; unsigned long tMs = 0; }; // v187：+prevX/Y 胶囊线段（上一脚→本脚=战壕）；v342：+shape（0=椭圆 1/2=鞋 mask 3=武器 mask）
+		struct Footprint { float x, y, depth, radius; float dirX, dirY, rL, rS; float prevX, prevY; int shape = 0; unsigned long tMs = 0; unsigned long dieAt = 0; }; // v187：+prevX/Y 胶囊线段；v342：+shape；v574：+dieAt（淡出开始时间戳，0=活跃，>0 淡出中 2s 后删除）
 		std::vector<Footprint> footprints;                        // 脚印列表（上限 512）
 
 		// v342：**接触模型形状检测**——黑神话级效果：变形按真实模型（鞋/武器）形状，
