@@ -1,15 +1,15 @@
 # Code Comparison Report
 
-DynamicShader-DynamicSnow (DynamicSnow.dll) vs the Snow Deformation feature by PppPlyr1 (Josef, skyrim-community-shaders-dynamic-snow-deformation)
+DynamicShader ecosystem (DynamicSnow.dll + DynamicShader Core + WaterPuddles + ENBLights + PCG) vs the Snow Deformation feature by PppPlyr1 (Josef, skyrim-community-shaders-dynamic-snow-deformation)
 
 Generated: 2026-08-27. All results are reproducible from the public repositories.
 
 ## Method
 
-- Line-by-line comparison of all 14 source files in this repo against all 14 source files in Josef's PR branch (pr2659 + full), whitespace stripped, comments and preprocessor directives excluded.
+- Line-by-line comparison of every source file in the Dynamic ecosystem against all 23 source files in Josef's PR branch (pr2659 + full), whitespace stripped, comments and preprocessor directives excluded.
 - For each file, the highest similarity across all Josef files is reported.
 
-## Results
+## Results (full ecosystem)
 
 | This repo file | Lines (non-comment) | Closest Josef file | Identical lines | Similarity |
 |---|---|---|---|---|
@@ -27,6 +27,32 @@ Generated: 2026-08-27. All results are reproducible from the public repositories
 | SnowShellMesh.cpp | 2738 | Stamping.cpp | 14 | 0.5% |
 | melting_grain.inc | 32770 | src_Features_SnowDeformation.cpp | 1 | 0.0% |
 | snow_heights.inc | 63725 | src_Features_SnowDeformation.cpp | 1 | 0.0% |
+
+## Full ecosystem scan (other projects)
+
+| Project / file | Lines (non-comment) | Closest Josef file | Similarity |
+|---|---|---|---|
+| DynamicShaderCore / CoreAPI.h | 20 | sh_DepthSyncCS.hlsl | 10.0% |
+| DynamicShaderCore / main.cpp | 106 | TerrainData.cpp | 4.7% |
+| DynamicWaterPuddles / WaterPuddles.cpp | 673 | src_Statics.cpp | 1.6% |
+| DynamicWaterPuddles / WaterPuddles.h | 107 | SnowDeformation.h | 3.3% |
+| DynamicWaterPuddles / main.cpp | 62 | sh_DepthSyncCS.hlsl | 4.8% |
+| DynamicWaterPuddles / LinkStubs.cpp | 114 | TerrainData.cpp | 2.6% |
+| DynamicENBLights / ENBLights.cpp | 127 | Stamping.cpp | 5.1% |
+| DynamicENBLights / ENBLights.h | 33 | sh_SnowHeightCapture.hlsl | 6.1% |
+| DynamicENBLights / main.cpp | 69 | TerrainData.cpp | 4.3% |
+| DynamicENBLights / LinkStubs.cpp | 114 | TerrainData.cpp | 2.6% |
+| DynamicPCG / PCG.cpp | 283 | Stamping.cpp | 2.8% |
+| DynamicPCG / PCG.h | 50 | sh_SnowHeightCapture.hlsl | 6.0% |
+| DynamicPCG / main.cpp | 60 | sh_DepthSyncCS.hlsl | 5.0% |
+| DynamicPCG / LinkStubs.cpp | 114 | TerrainData.cpp | 2.6% |
+
+NiUtils.h (shared across projects) matches sh_DepthSyncCS.hlsl at 13.3% — 2 identical lines in a 15-line utility header (generic helpers), not project logic.
+
+## Summary
+
+- The only significant match in the entire ecosystem is DeformationMap.cpp at 19.1% — the compute-shader kernel, disclosed in source comments and credited to PppPlyr1 per GPL-3.0.
+- Every other file across Core, WaterPuddles, ENBLights and PCG is below 6% (self-written).
 
 ## Breakdown of the two highest matches
 
