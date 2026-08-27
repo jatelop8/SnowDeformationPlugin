@@ -1452,6 +1452,13 @@ namespace SnowDeform
 	static std::atomic<unsigned long> gDelayMax{ 0 };
 	// v577：盖章间距统计（验证门 48 生效——预期 avg≈48+，之前 ~5）
 	static std::atomic<long long>     gStampGapSum{ 0 }, gStampN{ 0 };
+	// v604：**盖章同步精准检测（用户"保证移动和雪堆同步精准，不会延迟偏差"）**——
+	// 按类型统计盖章数（0=玩家 1=NPC 2=马 3=狼/其他动物）+ 盖章→场重建延迟
+	//（RebuildField 遍历脚印最新 tMs，now - maxTms = 最后盖章到本次重建的延迟，
+	// 不依赖额外原子，天然覆盖所有盖章路径）。2s 输出供数据对比。
+	static std::atomic<long long>     gStmpType[4]{ 0, 0, 0, 0 };
+	static std::atomic<long long>     gDelay2Sum{ 0 }, gDelay2N{ 0 };
+	static std::atomic<unsigned long> gDelay2Max{ 0 };
 	// v578（用户"没有用接着改"，2026-08-27）：**geom 失效计数**——SafeGeomValid
 	// 失败 = 引擎 LOD 重建了 LANDSCAPE geom（vertexCount 变化/对象替换）→ 缓存
 	// 失效 → 顶点循环跳过 → 雪堆消失 → 重缓存（800ms 节流）才恢复 = "走路时
@@ -1543,6 +1550,22 @@ namespace SnowDeform
 			footprints.erase(std::remove_if(footprints.begin(), footprints.end(),
 								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 2000; }),
 				footprints.end());
+			// v604：**盖章→场重建延迟**（遍历最新 tMs：最后盖章到本次重建，覆盖
+			// 玩家/动物/尸体所有盖章路径，天然无额外原子开销）——量化"移动和雪堆
+			// 是否同步精准"。v603 去限频后预期 ≈ 1 帧（5-16ms）。
+			unsigned long maxTms = 0;
+			for (const auto& f : footprints) {
+				if (f.tMs > maxTms)
+					maxTms = f.tMs;
+			}
+			if (maxTms != 0) {
+				const unsigned long nowT = GetTickCount();
+				const unsigned long d2 = nowT > maxTms ? nowT - maxTms : 0;
+				gDelay2Sum.fetch_add(d2, std::memory_order_relaxed);
+				gDelay2N.fetch_add(1, std::memory_order_relaxed);
+				unsigned long mx2 = gDelay2Max.load(std::memory_order_relaxed);
+				while (d2 > mx2 && !gDelay2Max.compare_exchange_weak(mx2, d2, std::memory_order_relaxed)) {}
+			}
 		}
 		bool hasObjFp = false;
 		{
@@ -3067,6 +3090,20 @@ namespace SnowDeform
 							shell.footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, 0.0f, 0.0f,
 								8.0f, 8.0f, px, py, 14, GetTickCount() });
 							shell.landFootDirty.store(true);
+							// v604：盖章类型计数（0 玩家 1 NPC 2 马 3 狼/其他动物）
+							if (auto* r = a->GetRace()) {
+								if (r->data.flags.any(RE::RACE_DATA::Flag::kFaceGenHead))
+									gStmpType[1].fetch_add(1, std::memory_order_relaxed);
+								else {
+									const char* eid = r->GetFormEditorID();
+									if (eid && std::strstr(eid, "Horse"))
+										gStmpType[2].fetch_add(1, std::memory_order_relaxed);
+									else
+										gStmpType[3].fetch_add(1, std::memory_order_relaxed);
+								}
+							} else {
+								gStmpType[3].fetch_add(1, std::memory_order_relaxed);
+							}
 						}
 						sDbgStamped++;
 						if (sDbgStampLog < 10) {
@@ -3101,6 +3138,20 @@ namespace SnowDeform
 					shell.footprints.push_back({ ap.x, ap.y, 0.8f, 0.0f, 0.0f, 0.0f,
 						8.0f, 8.0f, px, py, 14, GetTickCount() });
 					shell.landFootDirty.store(true);
+					// v604：盖章类型计数（0 玩家 1 NPC 2 马 3 狼/其他动物）
+					if (auto* r = a->GetRace()) {
+						if (r->data.flags.any(RE::RACE_DATA::Flag::kFaceGenHead))
+							gStmpType[1].fetch_add(1, std::memory_order_relaxed);
+						else {
+							const char* eid = r->GetFormEditorID();
+							if (eid && std::strstr(eid, "Horse"))
+								gStmpType[2].fetch_add(1, std::memory_order_relaxed);
+							else
+								gStmpType[3].fetch_add(1, std::memory_order_relaxed);
+						}
+					} else {
+						gStmpType[3].fetch_add(1, std::memory_order_relaxed);
+					}
 				}
 				sDbgStamped++;
 				// v589-dbg：盖章位置（首 10 个）——确认沟壑盖在 actor 轨迹上
@@ -3252,6 +3303,7 @@ namespace SnowDeform
 					{
 						std::lock_guard<std::mutex> lockF(footMtx);
 						footprints.push_back({ st.x, st.y, depth, 0.0f, ddx, ddy, fpRL, fpRS, st.px, st.py, fpShape, GetTickCount() });  // v554：玩家脚印记录 tMs（按时间回填 600s）
+						gStmpType[0].fetch_add(1, std::memory_order_relaxed);  // v604：玩家盖章计数
 						// v562：脚印贴花调用已移除（v561 系列全删）
 						// v558q：**粒子特效全部移除（用户拍板"所有粒子特效内容全部删掉"）**——
 						// v558~v558p 走路雪尘/烟云/自建颗粒全部删除（火焰验证走通 v558e 后
@@ -4377,6 +4429,7 @@ namespace SnowDeform
 								sdy_ = fdy;
 							}
 							footprints.push_back({ stCx, stCy, stampDepth, 0.0f, sdx_, sdy_, bootLen * 0.5f, bootWid * 0.5f, px, py, shapeId, GetTickCount() });  // v554：玩家脚印记录 tMs（按时间回填 600s）
+							gStmpType[0].fetch_add(1, std::memory_order_relaxed);  // v604：玩家盖章计数（渲染线程路径）
 							lastStampX[s] = stCx;
 							lastStampY[s] = stCy;
 							stampInited[s] = true;
@@ -4979,6 +5032,22 @@ namespace SnowDeform
 					gDelaySum.store(0, std::memory_order_relaxed);
 					gDelayN.store(0, std::memory_order_relaxed);
 					gDelayMax.store(0, std::memory_order_relaxed);
+					// v604：**盖章同步精准检测**——按类型盖章数（0 玩家 1 NPC 2 马
+					// 3 狼/其他）+ 盖章→场重建延迟（maxTms 路径，v603 去限频后
+					// 预期 ≈1 帧 5-16ms；>50ms = 盖章路径有延迟偏差）
+					SKSE::log::info("v604-dbg: stmp(p={} n={} h={} w={}) tmsDelayAvg={:.0f}ms tmsMax={}ms",
+						gStmpType[0].load(std::memory_order_relaxed),
+						gStmpType[1].load(std::memory_order_relaxed),
+						gStmpType[2].load(std::memory_order_relaxed),
+						gStmpType[3].load(std::memory_order_relaxed),
+						gDelay2N.load(std::memory_order_relaxed) > 0 ?
+							static_cast<double>(gDelay2Sum.load(std::memory_order_relaxed)) / gDelay2N.load(std::memory_order_relaxed) : 0.0,
+						gDelay2Max.load(std::memory_order_relaxed));
+					for (auto& gs : gStmpType)
+						gs.store(0, std::memory_order_relaxed);
+					gDelay2Sum.store(0, std::memory_order_relaxed);
+					gDelay2N.store(0, std::memory_order_relaxed);
+					gDelay2Max.store(0, std::memory_order_relaxed);
 					// v577：盖章间距（预期 avg≈48+ = 门生效，坑不重叠不跳）
 					SKSE::log::info("v577-dbg: stamps={}/2s gapAvg={:.0f}",
 						gStampN.load(std::memory_order_relaxed),
