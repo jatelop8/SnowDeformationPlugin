@@ -109,6 +109,10 @@ namespace SnowDeform
 		// 都扫不到已移出 process list 的尸体（v590-dbg corpse=0 实锤）→ 死亡事件在
 		// 死亡瞬间必触发（游戏线程），直接盖沿朝向椭圆压痕。main.cpp 注册 sink。
 		void OnActorDeath(RE::Actor* a);
+		// v598：**尸体抓取释放盖坑（用户"狼死后能拿起来丢地上出现坑洞"）**——
+		// 引擎 Z 键抓取尸体 → 释放瞬间 TESGrabReleaseEvent（grabbed=false）→ 在释放
+		// 位置盖浅椭圆坑（同尸体压痕参数，depth 0.35 → -6.3）。main.cpp 注册 sink。
+		void OnGrabRelease(RE::TESObjectREFR* a_ref, bool a_grabbed);
 		// v562：脚印贴花（v561 系列 SimpleDecal 路线）已全部移除（用户拍板——引擎
 		// Initialize 不建几何 geom3d=0x0 实锤，手动构造不可控）
 		// v207：分帧构建——main.cpp Present 驱动（渲染线程检测队列 → 游戏线程 Tick）

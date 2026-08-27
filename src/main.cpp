@@ -344,6 +344,20 @@ struct DeathSink : RE::BSTEventSink<RE::TESDeathEvent>
 };
 static DeathSink g_deathSink;
 
+// v598：**抓取释放 sink（尸体丢地上盖坑）**——TESGrabReleaseEvent 在 Z 键抓取/
+// 释放任何 REFR 时触发；释放尸体（grabbed=false）→ 盖浅椭圆坑在丢落位置
+struct GrabSink : RE::BSTEventSink<RE::TESGrabReleaseEvent>
+{
+	RE::BSEventNotifyControl ProcessEvent(const RE::TESGrabReleaseEvent* a_evn,
+		RE::BSTEventSource<RE::TESGrabReleaseEvent>*) override
+	{
+		if (a_evn)
+			SnowDeform::GetSnowShellMesh().OnGrabRelease(a_evn->ref.get(), a_evn->grabbed);
+		return RE::BSEventNotifyControl::kContinue;
+	}
+};
+static GrabSink g_grabSink;
+
 extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 {
 	// SKSE::Init 内部已自动初始化 spdlog 日志（CommonLibSSE-NG 4.x）：
@@ -366,7 +380,9 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	// v592：死亡事件注册（尸体压痕——死亡瞬间在倒下位置盖椭圆压痕）。
 	// ScriptEventSourceHolder 提供 AddEventSink<T> 模板（内部 GetEventSource 转派）
 	RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink(&g_deathSink);
-	SKSE::log::info("DynamicSnow: death event sink registered");
+	// v598：抓取释放注册（尸体丢地上盖坑）
+	RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink(&g_grabSink);
+	SKSE::log::info("DynamicSnow: death/grab event sinks registered");
 
 	// 注册 Papyrus 全局函数（控制台可调用）
 	if (SKSE::GetPapyrusInterface()->Register([](RE::BSScript::IVirtualMachine* a_vm) {

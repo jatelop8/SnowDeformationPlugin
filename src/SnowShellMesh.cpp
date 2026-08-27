@@ -2883,6 +2883,29 @@ namespace SnowDeform
 		SKSE::log::info("v597-dbg: death queued={}", a->GetDisplayFullName());
 	}
 
+	// v598：**尸体抓取释放盖坑**——引擎 Z 键抓取尸体 → 释放瞬间 TESGrabReleaseEvent
+	//（grabbed=false）→ 在释放位置盖浅椭圆坑（同尸体压痕参数）。物品滚动盖章
+	//（shape=9）是滚动路径；抓取释放是独立路径（尸体被举起来换地方丢 → 坑在丢处）。
+	// 防重复：同位置反复抓丢 → 场 max 合成不加深；列表受 v596 统一驱逐。
+	void SnowShellMesh::OnGrabRelease(RE::TESObjectREFR* a_ref, bool a_grabbed)
+	{
+		if (a_grabbed || !a_ref)
+			return;
+		auto* actor = a_ref->As<RE::Actor>();
+		if (!actor || !actor->IsDead())
+			return;  // 只处理尸体（活体抓取/普通物体不盖）
+		const auto ap = actor->GetPosition();
+		const float yaw = actor->GetAngle().z * 0.017453292f;  // 度→弧度
+		const float cY = std::cos(yaw), sY = std::sin(yaw);
+		{
+			std::lock_guard<std::mutex> lk(footMtx);
+			footprints.push_back({ ap.x, ap.y, 0.35f, 0.0f, cY, sY,
+				50.0f, 25.0f, ap.x, ap.y, 14, GetTickCount() });
+			landFootDirty.store(true);
+		}
+		SKSE::log::info("v598-dbg: corpse dropped={} at=({:.0f},{:.0f})", actor->GetDisplayFullName(), ap.x, ap.y);
+	}
+
 	void SnowShellMesh::ScanAnimalFeet()
 	{
 		auto* pl = RE::ProcessLists::GetSingleton();
