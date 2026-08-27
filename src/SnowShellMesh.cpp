@@ -4493,15 +4493,15 @@ namespace SnowDeform
 					const float spacing = 2048.0f / static_cast<float>(n - 1);
 					// v450：**坡面陡度按材质**——雪 1.0（45° 陡壁）；沙 0.5（~27°
 					// 缓坡，沙粒流动踩过边缘流平）；泥 0.75（~37° 中坡，粘滞）。
-					// v584：**雪堆更平滑（用户"三角感觉还是有点多，加一点"）**——降坡度角
-					// 让削坡更狠：雪 1.0→0.8（45°→~39°，缓 20%）、沙 0.5→0.4、泥
-					// 0.75→0.6（同比例 -20%）。雪堆棱角被磨圆（峰值略低但自然）。
-					// 不够再加：下一档 0.7（雪）。
-					float kSlopePerUnit = 0.8f;  // 0.8 ≈ 39°（Josef SnowMoundSteepness）
+					// v585：**再圆润一倍（用户"再圆润一倍"）**——v584 削坡 -20% 后用户仍要
+					// 更圆 → 坡度角再减半（削坡力度 ×2）：雪 0.8→0.4（~22°）、沙
+					// 0.4→0.2、泥 0.6→0.3。雪堆明显变矮变圆。若太圆/雪堆塌平 → 回调
+					// 0.55（雪，v584 与 v585 中间档）。
+					float kSlopePerUnit = 0.4f;  // 0.4 ≈ 22°（Josef SnowMoundSteepness）
 					if (lc.surfaceClass == 2)
-						kSlopePerUnit = 0.4f;
+						kSlopePerUnit = 0.2f;
 					else if (lc.surfaceClass == 3)
-						kSlopePerUnit = 0.6f;
+						kSlopePerUnit = 0.3f;
 					const int kConeSteps[3] = { 1, 2, 4 };
 					auto coneZAt = [&](int r, int c) -> float {
 						return *reinterpret_cast<const float*>(
