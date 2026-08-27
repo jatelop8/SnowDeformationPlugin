@@ -1994,7 +1994,12 @@ namespace SnowDeform
 					// v490：删物品保底特判——物品/玩家统一椭圆（物品 rS=8 → eS=8 同玩家）
 					const float dL = along / eL, dS = across / eS;
 					const float dNorm2 = dL * dL + dS * dS;
-					if (dNorm2 < 1.0f) {
+					// v595：**武器（shape=10）端点椭圆不写坑（用户"武器挖坑太大，
+					// 直接凹进去了"）**——v532 让 shape=10 分支只堆雪（bestR 无坑），
+					// 但单点攻击（prev=current → segLenSq≈0）走端点椭圆，这里无条件
+					// 写 d（坑）→ 武器砸出大深坑（rL=8 → 椭圆 ~30×16 + 满深）。排除
+					// shape=10 后：武器只剩雪堆隆起（v532 设计），不再凹进去。
+					if (dNorm2 < 1.0f && fp.shape != 10) {
 						const float t = std::sqrt(dNorm2);
 						// v329：**坑壁改平滑**——v297 改 (t-0.45)/0.55（45-100% 近垂直切面 =
 						// CS 雪墙感）但用户反馈"凹陷没有很好看"（太方、不像自然雪坑）。
