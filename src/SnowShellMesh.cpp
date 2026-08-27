@@ -2832,31 +2832,71 @@ namespace SnowDeform
 		struct LastP {
 			float x = 0.0f, y = 0.0f;
 			bool init = false;
+			bool wasDead = false;  // v590：尸体状态（活体→尸体转变时盖压痕）
 		};
 		static std::unordered_map<std::uint32_t, LastP> lastPos;
 		// v587-dbg：汇总统计（2s 输出一次）
 		static int sDbgStamped = 0, sDbgActors = 0;
 		static unsigned long lastDbgT = 0;
 		static int sDbgStampLog = 0;
+		// v590：**尸体压痕坑**——IsDead 不再跳过；尸体（含骷髅等不死族尸体）倒地面
+		// 盖一个沿 actor 朝向的椭圆压痕（长 100 宽 50 深-10.8，纯凹陷无雪堆）：
+		// ① 首见即尸体（走进看到）② 活体被打死倒下瞬间（wasDead false→true）。
+		// 尸体不动 → 盖一次即可，之后跳过（20 单位门控天然防重复）。
+		auto stampCorpse = [&](RE::Actor* a, const RE::NiPoint3& ap) {
+			const float yaw = a->GetAngle().z * 0.017453292f;  // 度→弧度（玩家 yaw 同款）
+			const float cY = std::cos(yaw), sY = std::sin(yaw);
+			{
+				auto& shell = SnowDeform::GetSnowShellMesh();
+				std::lock_guard<std::mutex> lk(shell.footMtx);
+				shell.footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, cY, sY,
+					50.0f, 25.0f, ap.x, ap.y, 14, GetTickCount() });
+				shell.landFootDirty.store(true);
+			}
+			sDbgStamped++;
+			if (sDbgStampLog < 10) {
+				sDbgStampLog++;
+				const float dPx = ap.x - pp.x, dPy = ap.y - pp.y;
+				SKSE::log::info("v590-dbg: corpse={} at=({:.0f},{:.0f}) distP={:.0f}",
+					a->GetDisplayFullName(), ap.x, ap.y,
+					std::sqrt(dPx * dPx + dPy * dPy));
+			}
+		};
 		pl->ForEachHighActor([&](RE::Actor* a) -> RE::BSContainer::ForEachResult {
-			if (!a || a == pc || a->IsDead())
+			if (!a || a == pc)
 				return RE::BSContainer::ForEachResult::kContinue;
-			// v587：人形/动物/骑乘全盖（只排除玩家自己与尸体）
+			// v587：人形/动物/骑乘全盖（只排除玩家自己）；v590：尸体也盖压痕
 			const auto ap = a->GetPosition();
 			// v587：范围 1000（用户选更大）
 			if ((ap - pp).Length() > 1000.0f)
 				return RE::BSContainer::ForEachResult::kContinue;
+			const bool isDead = a->IsDead();
 			auto& lp = lastPos[a->formID];
-			// v589：**actor 中心位置盖章（不再细分脚节点/最低节点兜底）**——用户
-			// "马也要和玩家骑马时候的雪沟壑一样"：actor 位置连续轨迹 → 玩家同款
-			// 战壕（马 4 蹄合成 1 条沟壑，与玩家骑马一致）。首见只记录不盖；
-			// 移动 >20 单位盖（prev=上次位置 → 连续胶囊战壕，玩家盖章同款逻辑）。
+			// v590：首见——尸体直接盖压痕；活体只记录（移动后才盖战壕）
 			if (!lp.init) {
 				lp.x = ap.x;
 				lp.y = ap.y;
 				lp.init = true;
+				lp.wasDead = isDead;
+				if (isDead)
+					stampCorpse(a, ap);
 				return RE::BSContainer::ForEachResult::kContinue;
 			}
+			// v590：活体→尸体转变（被打死倒下瞬间）→ 盖压痕
+			if (isDead) {
+				if (!lp.wasDead) {
+					lp.wasDead = true;
+					lp.x = ap.x;
+					lp.y = ap.y;
+					stampCorpse(a, ap);
+				}
+				return RE::BSContainer::ForEachResult::kContinue;
+			}
+			lp.wasDead = false;
+			// v589：**actor 中心位置盖章（不再细分脚节点）**——用户"马也要和玩家
+			// 骑马时候的雪沟壑一样"：actor 位置连续轨迹 → 玩家同款战壕（马 4 蹄
+			// 合成 1 条沟壑，与玩家骑马一致）。移动 >20 单位盖（prev=上次位置 →
+			// 连续胶囊战壕，玩家盖章同款逻辑）。
 			const float dx = ap.x - lp.x, dy = ap.y - lp.y;
 			if (dx * dx + dy * dy > 20.0f * 20.0f) {
 				const float px = lp.x, py = lp.y;
