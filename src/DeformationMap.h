@@ -71,7 +71,6 @@ namespace SnowDeform
 
 		// 初始化 D3D11 资源（延迟到首个渲染帧调用，此时 device/context 可用）
 		bool Initialize(ID3D11Device* device, ID3D11DeviceContext* context);
-		void Reset();
 
 		// 每帧更新：滚动 + 回填 + 印章混合，返回当前最新 SRV（供后续 shader 采样）
 		ID3D11ShaderResourceView* Update(const FrameInput& input);
@@ -79,13 +78,10 @@ namespace SnowDeform
 		// 最新变形图的 SRV（绑定到需要采样的着色器阶段）
 		ID3D11ShaderResourceView* GetCurrentSRV() const { return textures[currentTexture].srv.Get(); }
 
-		// 调试：把当前变形图导出为 DDS 文件
-		bool DebugExport(const std::string_view& path) const;
 
 	private:
 		bool CreateResources();
 		bool CreateComputeShader();
-		void ScrollAndRefill(const FrameInput& input);
 
 		// D3D11 资源
 		Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -103,11 +99,7 @@ namespace SnowDeform
 
 		Microsoft::WRL::ComPtr<ID3D11Buffer> perFrameCB;
 
-		// 窗口状态
-		float windowOriginX = 0.0f;
-		float windowOriginY = 0.0f;
-		int32_t pendingScrollX = 0;
-		int32_t pendingScrollY = 0;
+		// v567：windowOrigin 成员删除（Update 里只写不读——cb 用 input 局部值）
 		bool initialized = false;
 	};
 

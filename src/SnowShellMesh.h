@@ -38,15 +38,10 @@ namespace SnowDeform
 	class SnowShellMesh
 	{
 	public:
-		static constexpr std::uint32_t kGridSize = 48;        // 48x48 顶点 = 4418 三角形
-		static constexpr float         kHalfExtent = 2350.0f; // 覆盖 47x47 米（模板 NIF TEXEL=100）
-		static constexpr float         kTexel = 100.0f;
-		static constexpr float         kHeightOffset = 0.2f;  // 略高于地形防 z-fight
 
 		// 每帧记录玩家位置（Present hook 内调用；与 LANDSCAPE 更新同线程）
 		void UpdatePlayerPos(const RE::NiPoint3& a_pos);
 		// 从场景移除并释放
-		void Shutdown();
 
 		[[nodiscard]] bool IsValid() const { return root != nullptr; }
 
@@ -80,16 +75,12 @@ namespace SnowDeform
 		// 为"碰撞跟随下降"（玩家踩坑不悬空）铺路。游戏线程低频调度。
 		void ScanCellCollision();
 		// v170：高密度网格替换（骨架保留，方向转材质视差——见 v171）
-		void LoadHighResMesh();
-		void ReplaceQuadrant();
-		void FillHighResHeights(RE::NiAVObject* a_old);
 		// v190：程序建 255² 高密度网格（引擎 CreateTriShapeData，无需 NIF）+
 		// heights 双线性插值 + 替换 mesh.child + 重缓存
 		// v195：a_force=true 强制重建（v160 检测到引擎 LOD 重建后自动重新替换）
 		// v196：hook K_BUILD_LAND_GEOMETRY 内调用 BuildQuadTriShape 的 call 指令——
 		// 引擎每次构建/重建 quad 网格时我们立即 setMesh 换成缓存的 255²（SmoothTerrain
 		// 方式）。渲染管线拿到的永远是最新对象 → 根治"只认 2 块"。
-		void BuildHighResMesh(bool a_force = false);
 		void InstallQuadBuildHook();
 		// v559：**投射物命中 hook（箭矢 + 法术爆炸雪地效果）**——hook MissileProjectile/
 		// ArrowProjectile vtable 槽 0xBD（AddImpact 命中回调），命中位置写变形场：
@@ -115,10 +106,6 @@ namespace SnowDeform
 		// v562：脚印贴花（v561 系列 SimpleDecal 路线）已全部移除（用户拍板——引擎
 		// Initialize 不建几何 geom3d=0x0 实锤，手动构造不可控）
 		// v207：分帧构建——main.cpp Present 驱动（渲染线程检测队列 → 游戏线程 Tick）
-		bool               HighResBuildPending() const { return highResBuildQueued.load(); }
-		void               TickHighResBuild();        // 每帧建 4 cell（游戏线程）
-		void               FinishHighResBuild();      // v226：构建完成收尾（清队列 + 重缓存）
-		bool               BuildCell(int a_ci);       // 构建单个 cell（ci 0..48 → dx,dy -3..3）4 quad；成功 true / 无数据 skip false
 		// v449b：**读档/新游戏复位（F9 闪退修复）**——引擎卸载全部地形/REFR，
 		// cells/geom/footprints 等缓存指向悬空对象 → 写崩（vmovdqa [rcx] AV 实锤）。
 		// kPreLoadGame/kPostLoadGame/kNewGame 时清空全部状态，下轮 FindLandscape 重建。
@@ -126,8 +113,6 @@ namespace SnowDeform
 
 	private:
 		RE::NiAVObject*     root = nullptr;      // NIF 根节点（NiNode）
-		RE::NiNode*         attachNode = nullptr;
-		bool                attachToWorld = false;  // true=挂玩家3D父节点（世界空间）
 		RE::BSDynamicTriShape* dynMesh = nullptr;   // BSTriShape（v122 地形采样兜底节点）
 		RE::NiPoint3        playerPos{};        // v63：玩家位置（每帧更新）
 		void*               rendererData = nullptr;  // BSGraphics::TriShape*（LANDSCAPE BuildCell 替换用）
@@ -165,8 +150,6 @@ namespace SnowDeform
 		// ScanColliders push_back（vector 扩容），渲染线程 RebuildField/UpdateLandscape
 		// 遍历 + erase → 无锁并发 = 堆损坏（v380 布局变化触发 po3/OIF free 崩）。
 		std::mutex          footMtx;
-		float               weaponScratchX = 0.0f, weaponScratchY = 0.0f;  // 武器划痕累计起点
-		bool                weaponScratchInit = false;
 
 		// v346：**Havok 碰撞体盖章（CS Dynamic Snow 同款）**——玩家 3D 树碰撞体
 		// （bhkNiCollisionObject）逐形状收集 {中心, 半径}，游戏线程扫描（安全：
@@ -193,7 +176,6 @@ namespace SnowDeform
 		std::unordered_map<RE::FormID, ObjTrack> lastObjPos;  // 物品跟踪（移动/盖章状态）
 		unsigned long       movingScanLast = 0;    // 扫描节流（200ms）
 		// v448：砍击采集状态（斧砍地面 → 凹陷 5 次上限）
-		RE::ATTACK_STATE_ENUM lastAttackState = RE::ATTACK_STATE_ENUM::kNone;  // 攻击边沿检测
 		std::unordered_map<std::int64_t, int> mineCounts;  // 砍击格计数（key=40 单位格）
 		unsigned long       miningScanLast = 0;    // 扫描节流（50ms）
 		unsigned long       animalScanLast = 0;    // v560：动物脚印扫描节流（100ms）
@@ -218,8 +200,6 @@ namespace SnowDeform
 		std::atomic<bool>   bootShapeReady{ false };
 		std::atomic<bool>   bootShapePending{ false };
 		unsigned long       bootScanLast = 0;      // v296：上次鞋 mesh 扫描时间（每 10 秒重扫）
-		float               bootShapeLen = 60.0f;   // 游戏线程写 / 渲染线程读（4B 对齐原子）
-		float               bootShapeWid = 36.0f;
 
 		// v122：地形贴合——雪壳顶点贴合真实 LANDSCAPE 高度（不再是"玩家高度"平面）。
 		// terrainH 由游戏线程采样（AddTask 转发，GetLandHeight 是引擎函数只能在游戏
@@ -228,15 +208,11 @@ namespace SnowDeform
 		std::vector<float>  terrainH;                             // 每顶点地形高度缓存
 		std::atomic<std::uint32_t> terrainVersion{ 0 };           // 缓存版本（写端游戏线程）
 		RE::NiPoint3        lastTerrainPos{};                     // 上次采样位置
-		bool                terrainSampling = false;              // 采样请求已发出（防重入）
+		std::atomic<bool>   terrainSampling{false};               // v569：跨线程（渲染请求/游戏完成）改 atomic
 		void                RequestTerrainSample(const RE::NiPoint3& a_playerPos);  // 渲染线程
 		void                DoTerrainSample();                    // 游戏线程（AddTask）
 
 		// v124：法线重算（真实沟壑立体感）——坑壁法线朝侧面 → 光照真实明暗
-		std::uint16_t*      rawIndexData = nullptr;   // rendererData+0x28（三角形索引）
-		std::uint32_t       triangleCount = 0;        // 三角形数（GetTrishapeRuntimeData）
-		std::uint32_t       normalOffset = 20;        // v338b：NORMAL 偏移改引擎动态值（FindDynamicMesh 里从 vertexDesc 读取；原硬编码 16 与 UV@16 冲突 → 法线重算覆盖 UV → 拉伸）
-		std::vector<float>  normalAcc;                // 法线累加器（3×顶点数）
 
 		// v130：**真地形踩雪变形**（LANDSCAPE）——直接改真实地形网格顶点。
 		// 跨 cell 连续：缓存玩家周围 3×3 cell × 4 quadrant geom（9×4）。
@@ -291,7 +267,6 @@ namespace SnowDeform
 		std::atomic<bool>   landPaused{ false };   // v149：实验期间暂停正常变形
 		bool                landLayoutLogged = false; // v159：mesh.child 顶点布局已 dump
 		bool                playerSrcLogged = false;  // v260：玩家 cell 源密度已 dump
-		bool                uvLogged = false;         // v278：引擎网格 UV 已 dump（反推地形 UV 公式）
 		bool                landHLogged = false;      // v280：GetLandHeight 静息覆盖只首次（防每次 rebuild 边界跳变闪）
 
 		// v266：**CPU 变形场（世界坐标采样）**——用户方案"边界顶点链接一起变形"：
@@ -319,10 +294,12 @@ namespace SnowDeform
 		std::vector<float>      ridgeFieldObj;          // v529：物品/拖痕/深坑雪堆
 		float                   fieldOriginX = 0.0f;    // 场原点（对齐 kFieldStep 网格）
 		float                   fieldOriginY = 0.0f;
-		bool                    fieldReady = false;
+		std::atomic<bool>   fieldReady{false};  // v567：跨线程（FindLandscape 游戏线程 false / RebuildField 渲染线程 true）改 atomic
 		void                    RebuildField();         // 清空 + 所有脚印写入（盖章/回填/跨 cell）
 		void                    SampleField(float wx, float wy, float& deformOut, float& ridgeOut) const;
 		void                    SampleFieldObj(float wx, float wy, float& deformOut, float& ridgeOut) const;  // v529：物体场采样
+		void                    SampleFieldNearest(float wx, float wy, float& deformOut, float& ridgeOut) const;     // v564：最近邻（kFieldStep=4 顶点对齐，热路径 4 读→1 读）
+		void                    SampleFieldObjNearest(float wx, float wy, float& deformOut, float& ridgeOut) const;  // v564：物体场最近邻
 
 		// v435：**场景雪堆（墙边/岩石边自动堆雪）**——游戏线程（FindLandscape 末尾）
 		// 重建：收集玩家周围静态 REFR 的碰撞包围球（GetColliderBound，只读碰撞体安全）
@@ -347,17 +324,10 @@ namespace SnowDeform
 		// （129/257 网格平面）→ NiStream 加载（引擎建 rendererData/vb/ib）→ 替换
 		// mesh[q].child[0]（引擎真正渲染对象，v156 实锤）→ 每帧高度插值+脚印变形。
 		// 注：v171 用户转向"材质视差"路线（ENB 复杂视差+高度图），本骨架暂存。
-		RE::NiStream       highResStream;             // NiStream（长存！析构会释放对象树）
-		RE::NiAVObject*    highResRoot = nullptr;     // NIF 根（NiNode）
-		RE::NiAVObject*    highResMesh = nullptr;     // 高密度几何（BSTriShape/NiTriShape 统一）
-		bool               highResCtorDone = false;   // NiStream ctor 只调一次（RVA 0x00D1EF80）
 		std::atomic<bool>  highResReady{ false };     // 加载成功
 		std::atomic<bool>  highResReplaceQueued{ false }; // 渲染线程检测→游戏线程替换
-		std::uint32_t      highResN = 0;              // 网格密度（129/257…）
-		bool               highResReplacing = false;  // 替换进行中（防重入）
 		// v430：草式雪壳（v299/v301 B 方案）已清理——纯地形版不需要雪壳层
 		// 高密度网格原始高度插值源（替换时从被替换的 65×65 网格采样，防 z=0 塌陷）
-		std::vector<float> highResH;                  // [N*N] 插值后高度（局部 z）
 		// v190：程序建 255² 高密度网格（引擎 CreateTriShapeData 函数，顶点做到最好）
 		// 255²=65025 顶点 < 65536（uint16 索引上限）→ 间距 8.06，比 SmoothTerrain
 		// 129²（间距 16）细 2 倍——战壕/鞋印/雪堆细腻。高度源 = heights[4][289]
@@ -384,29 +354,19 @@ namespace SnowDeform
 		// 旧 3×3 残留 129²（旧快照）交界 → "走了以后裂缝"。5×5 与 landBuf 完全同尺寸
 		// 同快照 → 视野内全同批 129²，组内零裂缝。129² 与 65² 顶点对齐（32=2×16）无缝。
 		void*              highResRd[49][4] = {};     // 每 cell×quad 新 rendererData
-		void*              highResIB[49][4] = {};     // 每 cell×quad 索引缓冲
 		std::vector<std::uint8_t> highResVerts[49][4]; // 每 cell×quad CPU 顶点（stride=40）
-		std::vector<float> highResOrig[49][4];        // 每 cell×quad [N*N] 原始高度（heights 插值）
 		std::vector<std::uint16_t> highResIdx;        // 共用索引（局部网格相同），重建 rd 用
-		int                highResQuad = -1;          // 已建象限（-1=未建）
 		// v258：分帧构建状态——49 cell 每帧建 4 个（约 13 帧 ~0.2s 完成，中心优先）
-		std::atomic<bool>  highResBuildQueued{ false };
-		int                buildCellCursor = 0;       // 当前构建进度（cell 0..48）
 		// v226：自动补建——主队列建完时引擎低分辨率 LOD（17²/33²）的 cell 被 v225 密度
 		// 门槛 skip → 记录到 coarseSkips，每 1 秒重缓存（FindLandscape(true)）+ 重扫补建。
 		// 引擎升级 65² 后自动补建成功 → "走一次有裂缝，来回走才平"变成"自动 1-3 秒弄平"。
-		std::vector<int>   coarseSkips;                 // 因密度不足/无数据 skip 的 ci（待补建）
-		std::uint32_t      lastRetryTick = 0;           // 补建节流（GetTickCount，1 秒间隔）
-		int                stage2Rounds = 0;            // v260：阶段 2 重试轮次（上限 6 防无限循环=闪烁）
 		// v196：hook 状态（引擎构建 quad 网格的瞬间 setMesh 替换 255²）
 		RE::TESObjectLAND::LoadedLandData* highResHookLD = nullptr;  // 玩家 cell 的 ld（hook 判断）
-		bool               highResHookInstalled = false;            // hook 已装
 		static RE::BSTriShape* (*s_origBuildQuad)(RE::TESObjectLAND::LoadedLandData*, std::uint32_t);  // 原函数
 		static RE::BSTriShape* BuildQuadHookThunk(RE::TESObjectLAND::LoadedLandData*, std::uint32_t);  // thunk（类成员→可访问私有）
 
 		// v430：盒子 EnvMask/法线动态纹理（v364-v396）已清理——纯地形版不需要
 
-		std::uint32_t       vertexCount = kGridSize * kGridSize;
 
 		// v430：LoadMesh/AttachSnowMaterial/AttachSnowShell 等雪壳死代码已清理——
 		// 纯地形版无 NIF 加载链，stream/snowStream 成员随删（无悬空风险）

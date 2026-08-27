@@ -112,8 +112,10 @@ namespace SnowDeform
 				return false;
 			auto* bhkRigid = a_obj->body.get() ? a_obj->body.get()->AsBhkRigidBody() : nullptr;
 			auto* hkpRigid = bhkRigid ? skyrim_cast<RE::hkpRigidBody*>(bhkRigid->referencedObject.get()) : nullptr;
-			if (!bhkRigid || !hkpRigid || skyrim_cast<RE::hkpListShape*>(hkpRigid))
-				return false;  // hkpListShape 不支持，跳过
+			// v569：删死检查 skyrim_cast<hkpListShape*>（hkpRigid 是 hkpRigidBody，与
+			// hkpListShape 无继承关系恒 null）——ListShape 由 ExtractShapeBound default 兜底
+			if (!bhkRigid || !hkpRigid)
+				return false;
 			RE::hkVector4 massCenter;
 			bhkRigid->GetCenterOfMassWorld(massCenter);
 			float massTrans[4];
@@ -219,5 +221,11 @@ namespace SnowDeform
 
 		lastStampCount = stampCount;
 		return stampCount;
+	}
+
+	// v569：读档/新游戏清理上一帧位置缓存（旧存档 formID 复用 → 首帧胶囊段起点错）
+	void StampCollector::ClearPrevPositions()
+	{
+		g_stampPrevPositions.clear();
 	}
 }

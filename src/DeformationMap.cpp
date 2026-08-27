@@ -126,17 +126,6 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		return true;
 	}
 
-	void DeformationMap::Reset()
-	{
-		initialized = false;
-		currentTexture = 0;
-		windowOriginX = windowOriginY = 0.0f;
-		pendingScrollX = pendingScrollY = 0;
-		updateCS.Reset();
-		textures[0] = {};
-		textures[1] = {};
-		perFrameCB.Reset();
-	}
 
 	bool DeformationMap::CreateResources()
 	{
@@ -207,10 +196,6 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		if (!initialized)
 			return nullptr;
 
-		// 记录窗口状态
-		windowOriginX = input.windowOriginX;
-		windowOriginY = input.windowOriginY;
-
 		PerFrameCB cb{};
 		cb.WindowOriginX = input.windowOriginX;
 		cb.WindowOriginY = input.windowOriginY;
@@ -228,7 +213,9 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
 		// 上传常量
 		D3D11_MAPPED_SUBRESOURCE mapped{};
-		context->Map(perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+		// v569：Map HRESULT 检查——设备丢失等场景 Map 失败 → mapped.pData 空 → memcpy 空指针崩
+		if (FAILED(context->Map(perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+			return nullptr;
 		std::memcpy(mapped.pData, &cb, sizeof(cb));
 		context->Unmap(perFrameCB.Get(), 0);
 
@@ -261,78 +248,4 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		return textures[currentTexture].srv.Get();
 	}
 
-	bool DeformationMap::DebugExport(const std::string_view& path) const
-	{
-		if (!initialized)
-			return false;
-
-		// 把当前变形图拷到 staging 纹理并保存为 R32 DDS（简易）
-		D3D11_TEXTURE2D_DESC desc{};
-		textures[currentTexture].tex->GetDesc(&desc);
-
-		D3D11_TEXTURE2D_DESC stagingDesc = desc;
-		stagingDesc.Usage = D3D11_USAGE_STAGING;
-		stagingDesc.BindFlags = 0;
-		stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-
-		Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-		HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, staging.ReleaseAndGetAddressOf());
-		if (FAILED(hr))
-			return false;
-
-		context->CopyResource(staging.Get(), textures[currentTexture].tex.Get());
-
-		D3D11_MAPPED_SUBRESOURCE mapped{};
-		hr = context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-		if (FAILED(hr))
-			return false;
-
-		// 写 BMP 格式（Windows 看图软件可直接打开）：24 位 BGR，灰度图
-		// 值 0=黑（未踩），255=白（压实）
-		FILE* f = fopen(std::string(path).c_str(), "wb");
-		if (!f) {
-			context->Unmap(staging.Get(), 0);
-			return false;
-		}
-
-		const uint32_t w = desc.Width;
-		const uint32_t h = desc.Height;
-		const uint32_t rowSize = w * 3;  // 24bpp
-		const uint32_t paddedRow = (rowSize + 3) & ~3u;  // 每行 4 字节对齐
-		const uint32_t pixelDataSize = paddedRow * h;
-		const uint32_t fileSize = 54 + pixelDataSize;
-
-		// BITMAPFILEHEADER (14 bytes)
-		uint8_t header[54]{};
-		header[0] = 'B';
-		header[1] = 'M';
-		*reinterpret_cast<uint32_t*>(&header[2]) = fileSize;
-		*reinterpret_cast<uint32_t*>(&header[10]) = 54;  // data offset
-		// BITMAPINFOHEADER (40 bytes)
-		*reinterpret_cast<uint32_t*>(&header[14]) = 40;
-		*reinterpret_cast<int32_t*>(&header[18]) = static_cast<int32_t>(w);
-		*reinterpret_cast<int32_t*>(&header[22]) = static_cast<int32_t>(h);
-		*reinterpret_cast<uint16_t*>(&header[26]) = 1;   // planes
-		*reinterpret_cast<uint16_t*>(&header[28]) = 24;  // bpp
-		*reinterpret_cast<uint32_t*>(&header[34]) = pixelDataSize;
-
-		fwrite(header, 1, 54, f);
-
-		// 像素数据自底向上（BMP 惯例），每行 4 字节对齐
-		std::vector<uint8_t> rowBuf(paddedRow);
-		for (int32_t y = static_cast<int32_t>(h) - 1; y >= 0; y--) {
-			const float* srcRow = static_cast<const float*>(static_cast<const void*>(
-				static_cast<const char*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch));
-			for (uint32_t x = 0; x < w; x++) {
-				const uint8_t v = static_cast<uint8_t>(std::clamp(srcRow[x], 0.0f, 1.0f) * 255.0f);
-				rowBuf[x * 3 + 0] = v;  // B
-				rowBuf[x * 3 + 1] = v;  // G
-				rowBuf[x * 3 + 2] = v;  // R
-			}
-			fwrite(rowBuf.data(), 1, paddedRow, f);
-		}
-		fclose(f);
-		context->Unmap(staging.Get(), 0);
-		return true;
-	}
 }

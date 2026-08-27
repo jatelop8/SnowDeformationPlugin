@@ -56,8 +56,8 @@ namespace
 	// ---- Present hook：每帧驱动变形图更新 ----
 	using PresentFunc = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 	PresentFunc g_originalPresent = nullptr;
-	std::uint32_t autoCreateAt = 0;  // v77：kDataLoaded 后 3 秒自动创建雪壳（免按 F9）
-	bool autoCreateDone = false;     // v449b：提为文件级（读档后可重置，重新自动创建）
+	std::atomic<std::uint32_t> autoCreateAt{0};  // v569：跨线程（渲染线程读 / 游戏线程读档写）改 atomic
+	std::atomic<bool> autoCreateDone{false};        // v449b：提为文件级（读档后可重置）
 
 	SnowDeform::FrameInput GetFrameInput();
 
@@ -65,12 +65,13 @@ namespace
 	// 渲染线程）**——原 PresentHook 的 swapchain 链式调用由 Core 负责，插件只做变形。
 	void RenderCB(ID3D11DeviceContext* a_ctx, void*)
 	{
+		(void)a_ctx;  // v567：C4100——UpdateLandscape 内部自取 renderer ctx
 		// v406：**性能检测**——每帧总耗时 + 各阶段耗时（渲染线程），每 2 秒汇总。
 		// 判断依据：frame avg >16.7ms(60fps) = 掉帧；land 含 RebuildField（盖章帧重）；
 		// env/nrm 限频烘焙（盖章帧重，平时 ~0）；max 值定位卡顿峰值。
 		using clk = std::chrono::steady_clock;
-		static long long sFrameUs = 0, sShellUs = 0, sLandUs = 0, sDiffUs = 0, sEnvUs = 0, sNrmUs = 0;
-		static long long sFrameMaxUs = 0, sLandMaxUs = 0, sEnvMaxUs = 0, sNrmMaxUs = 0;
+		static long long sFrameUs = 0, sLandUs = 0;
+		static long long sFrameMaxUs = 0, sLandMaxUs = 0;
 		static int sFrames = 0;
 		static auto sDiagT = clk::now();
 		auto usBetween = [](clk::time_point a, clk::time_point b) {
@@ -93,15 +94,8 @@ namespace
 			// v444：动态视差已关闭（用户拍板——ENB wrap 采样 170.7 周期重复无法消除，
 			// 聚焦动态法线柔化阴影）
 			// SnowDeform::GetSnowShellMesh().UpdateDynamicParallax(ctx);
-			const auto t4 = clk::now();
-			sShellUs += usBetween(t1, t1);
 			sLandUs += usBetween(t1, t3);
-			sDiffUs += usBetween(t3, t4);
-			sEnvUs += usBetween(t4, t4);
-			sNrmUs += usBetween(t4, t4);
 			sLandMaxUs = std::max(sLandMaxUs, usBetween(t1, t3));
-			sEnvMaxUs = std::max(sEnvMaxUs, 0LL);
-			sNrmMaxUs = std::max(sNrmMaxUs, 0LL);
 		}
 		const auto tF1 = clk::now();
 		sFrameUs += usBetween(tF0, tF1);
@@ -109,19 +103,13 @@ namespace
 		sFrames++;
 		if (usBetween(sDiagT, clk::now()) >= 2'000'000) {
 			const double fAvg = static_cast<double>(sFrameUs) / 1000.0 / sFrames;
-			SKSE::log::info("v406-fps: frame={:.1f}ms({:.0f}fps) max={:.1f} shell={:.2f} land={:.2f}(max {:.1f}) env={:.2f}(max {:.1f}) nrm={:.2f}(max {:.1f}) diff={:.2f}",
+			SKSE::log::info("v406-fps: frame={:.1f}ms({:.0f}fps) max={:.1f} land={:.2f}(max {:.1f})",
 				fAvg, fAvg > 0.0 ? 1000.0 / fAvg : 0.0,
 				static_cast<double>(sFrameMaxUs) / 1000.0,
-				static_cast<double>(sShellUs) / 1000.0 / sFrames,
 				static_cast<double>(sLandUs) / 1000.0 / sFrames,
-				static_cast<double>(sLandMaxUs) / 1000.0,
-				static_cast<double>(sEnvUs) / 1000.0 / sFrames,
-				static_cast<double>(sEnvMaxUs) / 1000.0,
-				static_cast<double>(sNrmUs) / 1000.0 / sFrames,
-				static_cast<double>(sNrmMaxUs) / 1000.0,
-				static_cast<double>(sDiffUs) / 1000.0 / sFrames);
-			sFrameUs = sShellUs = sLandUs = sDiffUs = sEnvUs = sNrmUs = 0;
-			sFrameMaxUs = sLandMaxUs = sEnvMaxUs = sNrmMaxUs = 0;
+				static_cast<double>(sLandMaxUs) / 1000.0);
+			sFrameUs = sLandUs = 0;
+			sFrameMaxUs = sLandMaxUs = 0;
 			sFrames = 0;
 			sDiagT = clk::now();
 		}
@@ -211,18 +199,8 @@ namespace
 			SnowDeform::GetSnowShellMesh().UpdatePlayerPos(pos);
 		}
 
-		// v243：恢复分帧构建驱动（129² 替换 5×5——每帧建 4 cell，25 cell ≈ 7 帧 0.1s）
-		if (SnowDeform::GetSnowShellMesh().HighResBuildPending()) {
-			static std::uint32_t lastBuildTick = 0;
-			const auto nowT = GetTickCount();
-			if (nowT - lastBuildTick > 50) {  // 节流 ~20fps
-				lastBuildTick = nowT;
-				SKSE::GetTaskInterface()->AddTask([]() {
-					SnowDeform::GetSnowShellMesh().TickHighResBuild();
-				});
-			}
-		}
-
+		// v565：死分支删除——v434 零替换架构（Smooth Terrain 129² 直接改顶点），
+		// BuildHighResMesh 无调用者 → highResBuildQueued 恒 false → 本分支永不执行。
 		// v185：窗口 texel-snapped 滚动（CS SnowDeformation 借鉴）——
 		// 窗口原点按 texel 取整步进，ScrollDelta 让计算着色器滚动旧数据，
 		// 保证变形图跟随相机且不采样模糊。
@@ -270,17 +248,6 @@ namespace
 		static bool firstFrame = true;
 		input.clearMap = firstFrame;
 		firstFrame = false;
-
-		// 调试验证：每 600 帧（约 10 秒）导出一次变形图到 D:\Modding\SnowDeformationPlugin\debug\
-		// 白色=未踩，黑色=压实。在游戏里走一圈后去该目录看 BMP 即可确认数据层工作。
-		static uint32_t frameCounter = 0;
-		if (++frameCounter % 600 == 0) {
-			static uint32_t exportIndex = 0;
-			char filename[128];
-			std::snprintf(filename, sizeof(filename), "D:\\Modding\\SnowDeformationPlugin\\debug\\deform_%04u.bmp", exportIndex++);
-			SnowDeform::GetDeformationMap().DebugExport(filename);
-			SKSE::log::info("SnowDeformationPlugin: exported deformation map to {}", filename);
-		}
 
 		return input;
 	}
@@ -370,10 +337,6 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 
 	SKSE::log::info("DynamicSnow loaded");
 
-	// v198：预分配 trampoline（SKSE 默认只有 14 字节）——write_branch detour builder
-	// 入口需要额外存储原字节（每个 call site 14 字节，SmoothTerrain TRAMPOLINE_SIZE=192
-	// 同款）；不分配会 report_and_fail("Failed to handle allocation request") 崩溃。
-	SKSE::AllocTrampoline(192);
 
 	// v196：hook 引擎 BuildQuadTriShape 调用点（加载阶段即可——函数地址固定）——
 	// 引擎每次构建/重建 quad 网格时我们立即 setMesh 换成高密度网格（SmoothTerrain
@@ -411,6 +374,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 			msg->type == SKSE::MessagingInterface::kNewGame ||
 			msg->type == SKSE::MessagingInterface::kDeleteGame) {
 			SKSE::log::info("SnowDeformationPlugin: load event type={}, resetting cache", msg->type);
+			SnowDeform::StampCollector::ClearPrevPositions();  // v569：读档清胶囊轨迹缓存（旧 formID 复用）
 			SnowDeform::GetSnowShellMesh().ResetForLoadGame();
 			if (msg->type == SKSE::MessagingInterface::kPostLoadGame ||
 				msg->type == SKSE::MessagingInterface::kNewGame) {

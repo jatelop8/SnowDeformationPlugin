@@ -24,7 +24,6 @@ add_library(${PROJECT_NAME} SHARED
     src/StampCollector.cpp
     src/MeshScanner.cpp
     src/SnowShellMesh.cpp
-    src/LinkStubs.cpp
 )
 
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)

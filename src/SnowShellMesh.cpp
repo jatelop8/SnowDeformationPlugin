@@ -19,15 +19,12 @@
 #include "NiUtils.h"
 
 #include <SKSE/SKSE.h>
-#include <SKSE/Trampoline.h>  // v196：InstallQuadBuildHook 的 GetTrampoline
 
 #include <Windows.h>  // 须在 CommonLib 之后（REX::W32 强制）
 #include <d3d11.h>
 // v443：Terrain Helper 接入（hook BSLightingShader vtable 槽 4 + SetPSTexture）
 #include <RE/B/BSLightingShader.h>
-#include <RE/B/BSLightingShaderMaterialBase.h>
 // v558q：BSTempEffectParticle include 已移除（粒子特效全部删除）
-#include <RE/R/RendererShadowState.h>
 #include <RE/Offsets_VTABLE.h>
 // v559：投射物命中 hook（箭矢 + 法术爆炸）——AddImpact vtable 槽 0xBD
 #include <RE/P/Projectile.h>
@@ -132,7 +129,8 @@ namespace SnowDeform
 				// 签名都对，崩在对象不完整）。placement new 调引擎默认构造 = 完整 vtable +
 				// formatPrefs + name 初始化；再手动补 prev/next=null + rendererTexture。
 				auto* niTex = RE::malloc<RE::NiSourceTexture>();
-				new (niTex) RE::NiSourceTexture();  // 默认构造（vtable/成员完整）
+				new (niTex) RE::NiSourceTexture();  // 默认构造（vtable/成员完整）。C4291：placement new
+				// 无匹配 delete 属预期——对象所有权归引擎引用计数（NiRefObject）。
 				niTex->prev = nullptr;   // 纹理链表指针（默认构造不初始化 → 防引擎遍历崩）
 				niTex->next = nullptr;
 				niTex->unk40 = nullptr;  // BSResource::Stream*（无流）
@@ -202,7 +200,7 @@ namespace SnowDeform
 		// 200 步后最早脚印 erase 突变消失）。轨迹塌陷问题由 RebuildField 增量重建
 		// 机制兜底（脚印列表 erase 才从场消失，回填是渐进自然消失）。
 		constexpr float kRefillPerFrame = 1.0f / (86400.0f * 60.0f);
-		constexpr float kSnowDepth = 18.0f;  // v449：26→18（用户"凹槽太深违和，恢复之前好看的没太多浮空"——v440 观感 deepest≈-14；雪堆 12 < 坑 18，比例 0.67 不盖坑）——v442b：18→26
+		constexpr float kSnowDepth = 18.0f;  // v449：26→18（用户"凹槽太深违和"——v440 观感 deepest≈-14；雪堆 12 < 坑 18 比例 0.67 不盖坑）。v568：v442b"18→26"注释过时（v449 已改回 18）
 		// v206：雪分类（Josef TerrainData ClassifySnowClass 移植）——diffuse 文件名子串
 		// 匹配雪关键字（snow01/snow02/snowpath/grasssnow/snowrocks），回退 materialType
 		//（kSnow/kSnowStairs）。TESLandTexture 链路 v184/v186 实锤：
@@ -584,7 +582,9 @@ namespace SnowDeform
 	// 数据只在游戏线程访问，渲染线程直接调会闪退）。terrainSampling 防重入。
 	void SnowShellMesh::RequestTerrainSample(const RE::NiPoint3& a_playerPos)
 	{
-		if (!initialized || !root || terrainSampling)
+		if (!initialized || !root)
+			return;
+		if (terrainSampling.exchange(true))  // v569：防重入改 atomic（渲染线程写 true / 游戏线程写 false 跨线程）
 			return;
 		const float dx = a_playerPos.x - lastTerrainPos.x;
 		const float dy = a_playerPos.y - lastTerrainPos.y;
@@ -630,7 +630,7 @@ namespace SnowDeform
 			}
 		}
 		terrainVersion.fetch_add(1);  // 版本号发布（写端游戏线程，读端渲染线程）
-		terrainSampling = false;
+		terrainSampling.store(false);
 		if (terrainVersion.load() == 1)
 			SKSE::log::info("v122: terrain sampled ({} verts) h0={:.1f} fallback={:.1f}",
 				meshVertexCount, terrainH[0], fallbackH);
@@ -640,697 +640,9 @@ namespace SnowDeform
 	// Blender 导出 highres_quadrant.nif（129/257 平面，z=0）→ NiStream::LoadPath
 	// → 引擎加载器自动建 rendererData/vb/ib（v128 手工创建缺 rendererData 教训，
 	// 只有 NIF 加载器会建）→ 找几何块（BSTriShape 优先，NiTriShape 兜底）。
-	void SnowShellMesh::LoadHighResMesh()
-	{
-		constexpr std::uintptr_t kNiStreamCtorRVA = 0x00D1EF80;  // AE 1.6.1170
-		if (!highResCtorDone) {
-			using NiStreamCtor = void (*)(RE::NiStream*);
-			reinterpret_cast<NiStreamCtor>(
-				REL::Module::get().base() + kNiStreamCtorRVA)(&highResStream);
-			highResCtorDone = true;
-		}
-		auto* vt = *reinterpret_cast<std::uintptr_t**>(&highResStream);
-		if (!vt) {
-			SKSE::log::error("v170: highRes NiStream vtable null");
-			return;
-		}
-		using LoadPathFn = bool (*)(RE::NiStream*, const char*);
-		auto loadPath = reinterpret_cast<LoadPathFn>(vt[3]);  // LoadPath 槽位 3
-		if (!loadPath) {
-			SKSE::log::error("v170: highRes LoadPath vtable slot null");
-			return;
-		}
-		// 绝对路径：游戏目录 + Data\meshes\snowdeformation\highres_quadrant.nif
-		char exePath[MAX_PATH]{};
-		GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-		std::string p(exePath);
-		const auto s = p.find_last_of('\\');
-		if (s != std::string::npos)
-			p = p.substr(0, s + 1);
-		p += "Data\\meshes\\snowdeformation\\highres_quadrant.nif";
-		SKSE::log::info("v170: highRes LoadPath '{}'", p);
-		if (!loadPath(&highResStream, p.c_str())) {
-			SKSE::log::error("v170: highRes NIF load failed lastError={:x}",
-				highResStream.lastError);
-			return;
-		}
-		if (highResStream.topObjects.size() == 0) {
-			SKSE::log::error("v170: highRes no top objects");
-			return;
-		}
-		// 打印加载对象（确认几何块解析）
-		for (std::size_t i = 0; i < highResStream.objects.size(); i++) {
-			auto* obj = highResStream.objects[i].get();
-			SKSE::log::info("v170: obj[{}] rtti={}", i,
-				obj && obj->GetRTTI() ? obj->GetRTTI()->GetName() : "?");
-		}
-		// 递归找几何块（BSTriShape 优先，NiTriShape 兜底）
-		highResRoot = nullptr;
-		highResMesh = nullptr;
-		RE::NiObject* top = highResStream.topObjects.front().get();
-		highResRoot = As<RE::NiAVObject>(static_cast<RE::NiAVObject*>(top), "NiNode");
-		if (!highResRoot) {
-			SKSE::log::error("v170: highRes top not NiNode");
-			return;
-		}
-		// 递归（同 FindDynamicMesh 模式，RTTI 名字链）
-		std::function<void(RE::NiAVObject*)> find = [&](RE::NiAVObject* n) {
-			if (!n || highResMesh)
-				return;
-			if (auto* bs = As<RE::BSTriShape>(n, "BSTriShape"))
-				highResMesh = bs;
-			else if (auto* ns = As<RE::NiTriShape>(n, "NiTriShape"))
-				highResMesh = ns;
-			else if (auto* niN = As<RE::NiNode>(n, "NiNode")) {
-				for (auto& ch : niN->GetChildren())
-					find(ch.get());
-			}
-		};
-		find(highResRoot);
-		if (!highResMesh) {
-			SKSE::log::error("v170: no BSTriShape/NiTriShape found in highRes NIF");
-			return;
-		}
-		// 顶点数 → 网格密度（sqrt）
-		std::uint32_t vc = 0;
-		if (auto* bs = As<RE::BSTriShape>(highResMesh, "BSTriShape"))
-			vc = bs->GetTrishapeRuntimeData().vertexCount;
-		if (vc == 0) {
-			// NiTriShape 兜底：NiGeometry spModelData @0x128（NiGeometryData*）→ vertexCount
-			auto* nd = *reinterpret_cast<RE::NiGeometryData**>(
-				reinterpret_cast<std::uintptr_t>(highResMesh) + 0x128);
-			if (nd)
-				vc = nd->GetActiveVertexCount();
-		}
-		const auto n = static_cast<std::uint32_t>(std::sqrt(static_cast<double>(vc)) + 0.5);
-		highResN = (n * n == vc) ? n : 0;
-		SKSE::log::info("v170: highRes mesh loaded verts={} n={} ({}x{} grid)", vc, highResN, n, n);
-		highResReady.store(true);
-	}
-
-	// v299/v301：**草式雪壳（B 方案）**——独立雪层附加到 landscape mesh[q]
-	// （零替换零闪），顶点 z = 基岩 + 雪厚58 → 玩家物理脚在基岩、视觉陷雪里。
-	// **v301 程序建网格**：v299 用 NIF 模板（highres_quadrant.nif）引擎加载失败
-	// lastError=4 + pyffi 版本坏无法生成新模板 → 改为加载 snowshell.nif（BSTriShape
-	// 版，引擎可加载）拿对象骨架 → v190 引擎函数 createIB/createTSD 程序建 129²
-	// 平面 rendererData 替换其几何 → 附加。游戏线程（FindLandscape 后调用）。
-
-
-
-	// v170：把玩家 cell 的 mesh[q].child[0] 替换为高密度网格（游戏线程）。
-	// 流程：读旧 65×65 网格真实高度 → 替换 children[0] → 高度插值写入新网格
-	// → FindLandscape 重缓存（landOrig = 插值高度，防 z=0 塌陷）→ UpdateLandscape
-	// 正常变形（高密度顶点 → 脚印细腻）。
-	void SnowShellMesh::ReplaceQuadrant()
-	{
-		if (highResReplacing || !highResReady.load() || !highResMesh)
-			return;
-		highResReplacing = true;
-		const auto player = RE::PlayerCharacter::GetSingleton();
-		auto* tes = RE::TES::GetSingleton();
-		if (!player || !tes) {
-			highResReplacing = false;
-			return;
-		}
-		const auto pos = player->GetPosition();
-		auto* cell = tes->GetCell(pos);
-		auto* land = cell ? cell->GetRuntimeData().cellLand : nullptr;
-		auto* ld = (land && land->loadedData) ? land->loadedData : nullptr;
-		if (!ld) {
-			SKSE::log::warn("v170: replace — no landscape data");
-			highResReplacing = false;
-			return;
-		}
-		// TODO(v170): 替换前先读旧网格高度（FillHighResHeights）→ 再替换 → 重缓存
-		for (int q = 0; q < 4; q++) {
-			auto* meshNode = ld->mesh[q];
-			if (!meshNode || meshNode->GetChildren().size() == 0)
-				continue;
-			auto* oldGeo = meshNode->GetChildren()[0].get();
-			SKSE::log::info("v170: replace mesh[{}] child old={} (rtti={})",
-				q, static_cast<void*>(oldGeo),
-				oldGeo && oldGeo->GetRTTI() ? oldGeo->GetRTTI()->GetName() : "?");
-			// TODO(v170): children[0] = NiPointer<NiAVObject>(highResMesh)——
-			// 竞争风险（引擎可能正用 children）：只在 v160 检测到重建后的窗口替换
-		}
-		// TODO(v170): FillHighResHeights + FindLandscape() 重缓存
-		highResReplaceQueued.store(false);
-		highResReplacing = false;
-		SKSE::log::info("v170: replace done (skeleton, {}x{})", highResN, highResN);
-	}
-
-	// v170：从旧 65×65 网格双线性插值高度到高密度网格（防 z=0 塌陷）
-	void SnowShellMesh::FillHighResHeights(RE::NiAVObject* a_old)
-	{
-		// TODO(v170):
-		// 1. 读 a_old raw（rendererData+0x20）+ stride(40) + verts(4225) + worldT
-		// 2. 高密度顶点世界坐标 = 局部 + worldT；双线性采样旧网格 z
-		// 3. 写 highResMesh raw z + highResH[N*N]（work 基准）
-		SKSE::log::info("v170: FillHighResHeights skeleton (old={})", static_cast<void*>(a_old));
-	}
-
-	// v190：程序建 255² 高密度地形网格（顶点做到最好）——
-	//   引擎 CreateTriShapeData（SmoothTerrain REL 移植，顶点数据被拷贝）建 rendererData
-	//   → 替换 mesh.child（setMesh 模式：rendererData/vertexCount/triangleCount/bound）
-	//   → heights[4][289] 双线性插值做原始高度（无 Catmull-Rom → 无尖塔）
-	//   → FindLandscape 重缓存（高密度网格上变形 → 战壕/鞋印/雪堆细腻）。
-	// 255²=65025 < 65536（uint16 索引上限）→ 最大密度，间距 8.06。
-	void SnowShellMesh::BuildHighResMesh(bool a_force)
-	{
-		// v207：分帧构建——只设队列（不同步构建），TickHighResBuild 每帧建 2 cell。
-		// 25 cell × 4 quad = 100 块，约 13 帧（~0.2s）完成，不卡帧。v206 实测：
-		// 3×3 高密外边缘 cell 是原密度（65²/129²/33² 混合）→ 181² 与原密度交界
-		// 顶点不一致 → 裂缝 + 拉伸材质。必须 5×5（25 cell）全覆盖视野内密度。
-		// v199：不要在开头清 highResBuilt——force 语义由重设队列覆盖。
-		if (highResBuilt && !a_force)
-			return;
-		const auto player = RE::PlayerCharacter::GetSingleton();
-		auto* tes = RE::TES::GetSingleton();
-		if (!player || !tes) {
-			SKSE::log::warn("v207: no player/tes");
-			return;
-		}
-		const int n = static_cast<int>(highResDim);
-		const std::uint32_t nv = static_cast<std::uint32_t>(n) * n;
-		const std::uint32_t nt = static_cast<std::uint32_t>((n - 1) * (n - 1) * 2);
-		const float step = 2048.0f / static_cast<float>(n - 1);
-		constexpr std::uint32_t stride = 40;
-		constexpr std::uint32_t kAttrOff = 16;
-		// 索引（每 cell×quad 相同：局部 0..181² 网格）——共用一份
-		std::vector<std::uint16_t> idx(static_cast<std::size_t>(nt) * 3);
-		for (std::uint32_t r = 0; r < static_cast<std::uint32_t>(n) - 1; r++) {
-			for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(n) - 1; c++) {
-				const std::uint32_t i0 = r * n + c;
-				const std::uint32_t i1 = i0 + 1;
-				const std::uint32_t i2 = i0 + n;
-				const std::uint32_t i3 = i2 + 1;
-				auto* t = idx.data() + static_cast<std::size_t>((r * (n - 1) + c) * 6);
-				t[0] = static_cast<std::uint16_t>(i0);
-				t[1] = static_cast<std::uint16_t>(i1);
-				t[2] = static_cast<std::uint16_t>(i2);
-				t[3] = static_cast<std::uint16_t>(i1);
-				t[4] = static_cast<std::uint16_t>(i3);
-				t[5] = static_cast<std::uint16_t>(i2);
-			}
-		}
-		highResIdx = idx;
-		highResBuildQueued.store(true);
-		highResBuilt = false;
-		buildCellCursor = 0;
-		coarseSkips.clear();      // v226：新 rebuild 清空待补建列表（本批全量重建）
-		lastRetryTick = 0;
-		stage2Rounds = 0;         // v260：新 rebuild 重置阶段 2 轮次计数
-		SKSE::log::info("v258: high-res build queued (7x7 = 49 cells, {}x{} = {} verts each)", n, n, nv);
-	}
-
-	// 构建单个 cell（a_ci 0..24 → dx,dy -2..2）的 4 quad 高密网格并替换 mesh.child。
-	// v207：从旧 3×3 循环体抽取，扩到 5×5；每帧 TickHighResBuild 调 2 次。
-	bool SnowShellMesh::BuildCell(int a_ci)
-	{
-		// v217：**不幂等**——a_ci 是相对玩家 5×5 索引，玩家移动后同索引对应不同绝对 cell，
-		// 幂等跳过会导致移动后重叠 cell 不重建（变回 65²）。每次 rebuild 全建 25 cell。
-		// v224：**3×3 → 5×5（关键裂缝修复）**——v222 时代构建范围 3×3 < landBuf 缓存 5×5：
-		// 玩家移动后新 3×3 用新 landBuf 快照重建，旧 3×3 残留的 129² cell（新 3×3 外）
-		// 保持旧快照高度 → 两类 129² 交界处高度不一致 → "走了以后裂缝"（用户实锤）。
-		// 5×5 与 landBuf 完全同尺寸同快照 → 视野内全同批 129²，组内零裂缝。
-		// lci=(dy+2)*5+(dx+2)（v222 修正）在 dy/dx ∈ -2..2 时正好全覆盖 0..24，天然对齐。
-		// v258：7×7（a_ci 0..48 → dx,dy -3..3）。v257 用户实锤裂缝在 5×5 边缘
-		// （129² 与引擎 65² 交界，雪堆/坑大变形放大）——7×7 半径 3.5 cell 覆盖视野。
-		const int dx = (a_ci % 7) - 3;
-		const int dy = (a_ci / 7) - 3;
-		const auto player = RE::PlayerCharacter::GetSingleton();
-		auto* tes = RE::TES::GetSingleton();
-		if (!player || !tes) {
-			SKSE::log::warn("v207: no player/tes");
-			return false;
-		}
-		const auto pos = player->GetPosition();
-		const int n = static_cast<int>(highResDim);
-		const std::uint32_t nv = static_cast<std::uint32_t>(n) * n;
-		const std::uint32_t nt = static_cast<std::uint32_t>((n - 1) * (n - 1) * 2);
-		const float step = 2048.0f / static_cast<float>(n - 1);
-		constexpr std::uint32_t stride = 40;
-		constexpr std::uint32_t kAttrOff = 16;
-		// v223：FindLandscape 未完成（landReady=false）不构建——防读未填 landBuf / 半切换
-		if (!landReady.load())
-			return false;
-		const auto& idx = highResIdx;
-		const auto renderer = RE::BSGraphics::Renderer::GetSingleton();
-		if (!renderer) {
-			SKSE::log::warn("v207: no renderer");
-			return false;
-		}
-		static constexpr REL::RelocationID kCreateIB(75503, 77294);
-		static constexpr REL::RelocationID kCreateTSD(75475, 77261);
-		using CreateIndexBuffer_t = void*(RE::BSGraphics::Renderer*, std::uint32_t, const std::uint16_t*);
-		using CreateTriShapeData_t = void*(RE::BSGraphics::Renderer*, const void*, std::uint32_t, std::uint64_t, void*);
-		static const REL::Relocation<CreateIndexBuffer_t> createIB{ kCreateIB };
-		static const REL::Relocation<CreateTriShapeData_t> createTSD{ kCreateTSD };
-		// v207：5×5 cell 全部替换（玩家 cell + 24 邻居）——视野内无密度跳变。
-		// 每 cell 用自己的 ld/heights[q]（probe = 玩家位置 + dx/dy×4096 定位邻居 cell）。
-		RE::NiPoint3 probe{ pos.x + dx * 4096.0f, pos.y + dy * 4096.0f, pos.z };
-		auto* cellC = tes->GetCell(probe);
-		auto* landC = cellC ? cellC->GetRuntimeData().cellLand : nullptr;
-		auto* ldC = (landC && landC->loadedData) ? landC->loadedData : nullptr;
-		if (!ldC) {
-			// v209：边缘 cell landscape 流式加载滞后——skip 由 Tick 重试补（有成功继续下一轮）
-			// v260：**返回 true（视为已处理）**——7×7 边缘 land=N 的 cell 引擎根本不加载
-			// （3 cell 外无 landscape 数据，v258 日志实锤）→ 永远 skip → coarseSkips 永非空
-			// → Tick 阶段 2 每秒 FindLandscape(true)+全量重建 → 每秒替换 rendererData =
-			// "地块一闪一闪"（用户实锤，v259 修 v160 后仍闪=这个循环）。引擎未加载的
-			// cell 保持引擎网格（本就无法替换），玩家移动后引擎加载→新 rebuild 自然补建。
-			return true;
-		}
-		// cell 锚点（v145 公式：cell 世界原点 + 2048）
-		const float anchorX = (cellC->GetCoordinates() ?
-			static_cast<float>(cellC->GetCoordinates()->cellX) * 4096.0f + 2048.0f :
-			pos.x);
-		const float anchorY = (cellC->GetCoordinates() ?
-			static_cast<float>(cellC->GetCoordinates()->cellY) * 4096.0f + 2048.0f :
-			pos.y);
-		int built = 0;
-		for (int q = 0; q < 4; q++) {
-					auto* meshNode = ldC->mesh[q];
-					if (!meshNode || meshNode->GetChildren().size() == 0)
-						continue;
-					auto* target = As<RE::BSTriShape>(meshNode->GetChildren()[0].get(), "BSTriShape");
-					if (!target)
-						continue;
-					const float qx0 = (q & 1) ? 0.0f : -2048.0f;
-					const float qy0 = (q & 2) ? 0.0f : -2048.0f;
-					auto& gd = target->GetGeometryRuntimeData();
-					// v257：权威布局 dump（CommonLib API）——hex 已确认 @20 NORMAL/@24 TANGENT/
-					// @28 COLOR/@32 LAND_DATA 疑似，但 @16/@36 未定 + w=0.98 非 1.0。
-					// 每次 BuildCell 首次跑时打印一次，拿引擎真实属性偏移。
-					{
-						static bool layoutLogged = false;
-						if (!layoutLogged) {
-							layoutLogged = true;
-							using Attr = RE::BSGraphics::Vertex::Attribute;
-							const auto& vd = gd.vertexDesc;
-							SKSE::log::info(
-								"v257-layout: pos={} uv0={} normal={} tangent={} color={} landdata={}",
-								vd.GetAttributeOffset(Attr::VA_POSITION),
-								vd.GetAttributeOffset(Attr::VA_TEXCOORD0),
-								vd.GetAttributeOffset(Attr::VA_NORMAL),
-								vd.GetAttributeOffset(Attr::VA_BINORMAL),
-								vd.GetAttributeOffset(Attr::VA_COLOR),
-								vd.GetAttributeOffset(Attr::VA_LANDDATA));
-						}
-					}
-					const auto vertexDesc = std::bit_cast<std::uint64_t>(gd.vertexDesc);
-					// v223：属性/高度源 = landBuf 缓存的 orig（FindLandscape 写后只读）——
-					// 消除 oldRaw 三宗罪：线程竞态（渲染线程动 raw）/ 悬空（引擎 LOD 重建）/
-					// 二次 rebuild 漂移（oldRaw 变成上次 129²）。用 lcO.stride 通用读。
-					const int lci = (dy + 3) * 7 + (dx + 3);
-					auto& lcO = landBuf[landBufIdx.load()][lci][q];
-					// v254：**双层门槛 bug**——v251 只改了外层 `onO<65`→`<17`，内层
-					// `sq>=65` 漏改 → verts=289 → sq=17 → 内层 false → onO=0 → 外层
-					// 判 skip → "src=0x0"（v253 诊断实锤：verts=289 却 src=0x0）。
-					// 内外统一 `>=17`（任何已加载引擎网格 17²+ 都可作 129² 源）。
-					int onO = 0;
-					float ostepO = 0.0f;
-					if (lcO.verts >= 4 && lcO.stride >= 20 &&
-						lcO.orig.size() >= static_cast<std::size_t>(lcO.stride) * lcO.verts) {
-						const int sq = static_cast<int>(std::sqrt(static_cast<double>(lcO.verts)) + 0.5);
-						if (sq * sq == static_cast<int>(lcO.verts) && sq >= 17) {
-							onO = sq;
-							ostepO = 2048.0f / static_cast<float>(onO - 1);
-						}
-					}
-					// v278：**引擎网格 UV 反推 dump**——用户反馈"UV 不对，地块没显示正确
-					// 材质"：129² 直算 UV (x-qx0)/2048（v261）可能 ≠ 引擎真实地形 UV 公式
-					// （v159 17² dump：x=-1920 处 u=0.75 ≠ 线性 0.0625 → 疑引擎 UV 有
-					// tiling/象限级映射）。dump 源网格（引擎原始数据）顶点 UV half 位模式
-					// （@16，halfToFloat 解）vs 局部坐标 → 反推公式。首次 BuildCell 时
-					// lcO.orig 还是引擎网格（替换前缓存）→ 真实引擎 UV。
-					if (q == 0 && !uvLogged && onO >= 17) {
-						uvLogged = true;
-						auto halfToFloat = [](std::uint16_t h) -> float {
-							const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000) << 16;
-							const std::uint32_t exp = (h >> 10) & 0x1F;
-							const std::uint32_t mant = h & 0x3FF;
-							if (exp == 0)
-								return std::bit_cast<float>(sign | (mant << 13));
-							if (exp == 31)
-								return std::bit_cast<float>(sign | 0x7F800000u | (mant << 13));
-							return std::bit_cast<float>(
-								sign | ((exp - 15 + 127) << 23) | (mant << 13));
-						};
-						const int kMax = std::min(5, static_cast<int>(lcO.verts));
-						for (int k = 0; k < kMax; k++) {
-							const auto* pk = lcO.orig.data() +
-								static_cast<std::size_t>(k) * lcO.stride;
-							const float xk = *reinterpret_cast<const float*>(pk + 0);
-							const float yk = *reinterpret_cast<const float*>(pk + 4);
-							const auto u16 = *reinterpret_cast<const std::uint16_t*>(pk + 16);
-							const auto v16 = *reinterpret_cast<const std::uint16_t*>(pk + 18);
-							SKSE::log::info("v278-uv: src[{}] x={:.0f} y={:.0f} u={:.5f} v={:.5f} (onO={})",
-								k, xk, yk, halfToFloat(u16), halfToFloat(v16), onO);
-						}
-					}
-					// v225：密度不足（<65²，引擎低分辨率 LOD 瞬态）→ **本 quad 不建**（continue），
-					// 保持引擎网格密度——绝不用 17²/33² 兜底建 129²（会建出平网格 → 裂缝）。
-					// 同 cell 内 129² quad 与 65² quad 混合：边界顶点对齐（32=2×16）+ 同源
-					// 插值 → 无缝（v151 [16641 4225 16641 4225] 混合本身不是裂缝原因）。
-					if (onO < 17) {
-						// v251：门槛 65² → 17²——v250 实测玩家移动中引擎 quadrant 给 17²
-						// （289，v151 全 289 实锤），旧门槛 sq>=65 全拒 → 129² 永不建 →
-						// 变形在 17²（间距 128）上覆盖 0 顶点 → "雪堆效果没有"。
-						// Smooth Terrain 已禁（v243 用户操作）——引擎网格统一体系跨 cell
-						// 连续 → 任意密度源插值建 129² 边界同源无缝（17² 源插值 = 平滑细分，
-						// 引擎升级 65² 后源变细更精确）。仅 0 顶点/无数据才 skip。
-						SKSE::log::info("v225: cell{} quad{} src={}x{} too coarse — keep engine mesh",
-							a_ci, q, onO == 0 ? 0 : onO, onO == 0 ? 0 : onO);
-						continue;
-					}
-					// 顶点：x/y 网格 + z/属性从 landBuf orig 双线性插值（边界 = 原网格顶点，零裂缝）
-					auto& hv = highResVerts[a_ci][q];
-					auto& ho = highResOrig[a_ci][q];
-					hv.resize(static_cast<std::size_t>(nv) * stride, 0);
-					ho.resize(nv);
-					for (std::uint32_t r = 0; r < n; r++) {
-						for (std::uint32_t c = 0; c < n; c++) {
-							const float x = qx0 + static_cast<float>(c) * step;
-							const float y = qy0 + static_cast<float>(r) * step;
-							const std::uint32_t i = r * n + c;
-							auto* p = reinterpret_cast<float*>(hv.data() + static_cast<std::size_t>(i) * stride);
-							p[0] = x;
-							p[1] = y;
-							p[3] = 1.0f;
-							// v223：高度 + 属性统一从 landBuf orig 双线性插值（lcO.stride 通用读，
-							// 消除 oldRaw 竞态/悬空/二次 rebuild 漂移 + 硬编码 40 越界风险）
-							float z = 0.0f;
-							bool zValid = false;
-							if (onO >= 2) {
-								const float ogx = std::clamp((x - qx0) / ostepO, 0.0f, static_cast<float>(onO - 1));
-								const float ogy = std::clamp((y - qy0) / ostepO, 0.0f, static_cast<float>(onO - 1));
-								const int ox0 = static_cast<int>(ogx);
-								const int oy0 = static_cast<int>(ogy);
-								const int ox1 = std::min(onO - 1, ox0 + 1);
-								const int oy1 = std::min(onO - 1, oy0 + 1);
-								const float ofx = ogx - static_cast<float>(ox0);
-								const float ofy = ogy - static_cast<float>(oy0);
-								const auto srcAt = [&](int rr, int cc) -> const std::uint8_t* {
-									return lcO.orig.data() + static_cast<std::size_t>((rr * onO + cc)) * lcO.stride;
-								};
-								// z（+8）
-								const auto* z00p = reinterpret_cast<const float*>(srcAt(oy0, ox0) + 8);
-								const auto* z10p = reinterpret_cast<const float*>(srcAt(oy0, ox1) + 8);
-								const auto* z01p = reinterpret_cast<const float*>(srcAt(oy1, ox0) + 8);
-								const auto* z11p = reinterpret_cast<const float*>(srcAt(oy1, ox1) + 8);
-								const float z00 = *z00p, z10 = *z10p, z01 = *z01p, z11 = *z11p;
-								z = (z00 * (1.0f - ofx) + z10 * ofx) * (1.0f - ofy) +
-									(z01 * (1.0f - ofx) + z11 * ofx) * ofy;
-								zValid = true;
-								// v257：w 分量（@12）从源插值——v256-dbg hex 实测源 w=0.976~0.989
-								// （非 1.0）！引擎地形 POSITION.w 是高度压缩关键值（顶点 z 在
-								// 世界空间的重建系数），写死 1.0f 会导致地形高度/雾渲染错误
-								// （"材质不对"疑因之一）。双线性插值保持平滑。
-								const auto* w00p = reinterpret_cast<const float*>(srcAt(oy0, ox0) + 12);
-								const auto* w10p = reinterpret_cast<const float*>(srcAt(oy0, ox1) + 12);
-								const auto* w01p = reinterpret_cast<const float*>(srcAt(oy1, ox0) + 12);
-								const auto* w11p = reinterpret_cast<const float*>(srcAt(oy1, ox1) + 12);
-								p[3] = (*w00p * (1.0f - ofx) + *w10p * ofx) * (1.0f - ofy) +
-									(*w01p * (1.0f - ofx) + *w11p * ofx) * ofy;
-								// 属性（@kAttrOff=16 起 24 字节）——v261：**UV 直接算**。
-								// v257-layout 实测：pos=0 | uv0=16（TEXCOORD0 half2）| normal=20 |
-								// tangent=24 | color=28 | landdata=32。
-								// v261：**UV 不再从源插值**——v256-dbg 实锤 17² 源 UV 是 LOD 级
-								// 量化（v[1] x=-1920 处 u=0.75，非 (x-qx0)/2048 线性）→ 插值出的
-								// 129² UV 与引擎网格不一致 → "地块交接材质拉伸"（用户实锤）。
-								// 地形 UV = 局部坐标归一化（v[0] 西南角 half(0,0) 实锤匹配）：
-								// u=(x-qx0)/2048, v=(y-qy0)/2048——直接算 → 129² 与引擎 65²
-								// 同公式 → 交界 UV 连续。@20-39 byte 插值（NORMAL/TANGENT/
-								// COLOR/LANDDATA）。
-								const auto* a00 = srcAt(oy0, ox0) + kAttrOff;
-								const auto* a10 = srcAt(oy0, ox1) + kAttrOff;
-								const auto* a01 = srcAt(oy1, ox0) + kAttrOff;
-								const auto* a11 = srcAt(oy1, ox1) + kAttrOff;
-								auto* dst = reinterpret_cast<std::uint8_t*>(p) + kAttrOff;
-								// float→half（IEEE 754 half，Skyrim 顶点 UV 格式）
-								auto floatToHalf = [](float f) -> std::uint16_t {
-									const std::uint32_t b = std::bit_cast<std::uint32_t>(f);
-									const std::uint32_t sign = (b >> 16) & 0x8000;
-									const std::int32_t exp =
-										static_cast<std::int32_t>((b >> 23) & 0xFF) - 127 + 15;
-									const std::uint32_t mant = b & 0x7FFFFF;
-									if (exp >= 31)
-										return static_cast<std::uint16_t>(sign | 0x7C00);
-									if (exp <= 0)
-										return static_cast<std::uint16_t>(sign);
-									return static_cast<std::uint16_t>(
-										sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
-								};
-								// @16-19 UV half2：**直接算**（局部坐标归一化，与引擎地形 UV 同公式）
-								// v279：**引擎地形 UV tiling=12**——v278-uv 实测 17² 源：
-								// x=-2048→u=0 / x=-1920→u=0.75 / x=-1792→u=1.5 / x=-1536→u=3.0
-								// → u=(x-qx0)/128×0.75 = **(x-qx0)/2048×12**（每 quadrant 12 次
-								// 纹理 tiling）。v261 直算 u/2048（tiling=1）→ 纹理放大 12 倍
-								// → "地块没显示正确材质"（用户实锤）。**不能 clamp**（tiling
-								// 值 >1 是正常纹理重复，clamp 会截断）。
-								const float uNorm = ((x - qx0) / 2048.0f) * 12.0f;
-								const float vNorm = ((y - qy0) / 2048.0f) * 12.0f;
-								auto* uv16 = reinterpret_cast<std::uint16_t*>(dst);
-								uv16[0] = floatToHalf(uNorm);
-								uv16[1] = floatToHalf(vNorm);
-								// @20-39（NORMAL/TANGENT/COLOR/LANDDATA/扩展）：byte 插值
-								const std::uint32_t attrBytes = std::min<std::uint32_t>(24, lcO.stride - kAttrOff);
-								for (std::uint32_t b = 4; b < attrBytes; b++) {
-									const float v00 = static_cast<float>(a00[b]);
-									const float v10 = static_cast<float>(a10[b]);
-									const float v01 = static_cast<float>(a01[b]);
-									const float v11 = static_cast<float>(a11[b]);
-									const float v = (v00 * (1.0f - ofx) + v10 * ofx) * (1.0f - ofy) +
-										(v01 * (1.0f - ofx) + v11 * ofx) * ofy;
-									dst[b] = static_cast<std::uint8_t>(v);
-								}
-							}
-							if (!zValid) {
-								// 兜底：ldC->heights[q]（17×17 粗插值）
-								const float gx = std::clamp((x - qx0) / 128.0f, 0.0f, 16.0f);
-								const float gy = std::clamp((y - qy0) / 128.0f, 0.0f, 16.0f);
-								const int gx0 = static_cast<int>(gx);
-								const int gy0 = static_cast<int>(gy);
-								const int gx1 = std::min(16, gx0 + 1);
-								const int gy1 = std::min(16, gy0 + 1);
-								const float fx = gx - static_cast<float>(gx0);
-								const float fy = gy - static_cast<float>(gy0);
-								const float h00 = ldC->heights[q][gy0 * 17 + gx0];
-								const float h10 = ldC->heights[q][gy0 * 17 + gx1];
-								const float h01 = ldC->heights[q][gy1 * 17 + gx0];
-								const float h11 = ldC->heights[q][gy1 * 17 + gx1];
-								z = (h00 * (1.0f - fx) + h10 * fx) * (1.0f - fy) +
-									(h01 * (1.0f - fx) + h11 * fx) * fy;
-							}
-							p[2] = z;
-							ho[i] = z;
-						}
-					}
-					// 建 GPU 缓冲 + setMesh 替换
-					void* ib = createIB(renderer, nt * 3, idx.data());
-					if (!ib) {
-						SKSE::log::warn("v207: cell{} quad{} CreateIndexBuffer failed", a_ci, q);
-						continue;
-					}
-					void* rd = createTSD(renderer, hv.data(),
-						static_cast<std::uint32_t>(hv.size()), vertexDesc, ib);
-					if (!rd) {
-						SKSE::log::warn("v207: cell{} quad{} CreateTriShapeData failed", a_ci, q);
-						continue;
-					}
-					highResIB[a_ci][q] = ib;
-					highResRd[a_ci][q] = rd;
-					auto& gd2 = target->GetGeometryRuntimeData();
-					auto& td2 = target->GetTrishapeRuntimeData();
-					gd2.rendererData = static_cast<RE::BSGraphics::TriShape*>(rd);
-					td2.vertexCount = static_cast<std::uint16_t>(nv);
-					td2.triangleCount = static_cast<std::uint16_t>(nt);
-					auto& mb = target->GetModelData().modelBound;
-					mb.center = RE::NiPoint3(
-						(q & 1) ? 1024.0f : -1024.0f,
-						(q & 2) ? 1024.0f : -1024.0f,
-						0.0f);
-					mb.radius = 1500.0f;
-					built++;
-					// v259：**替换后同步 cells[ci][q]**——v160 检测用 cells.geom（FindLandscape
-					// 缓存的对象）；BuildCell 替换 mesh.child 后不更新 → cells.geom 是旧对象
-					// （引擎重建它后失效）→ SafeGeomValid invalid → 每秒全量恢复 → 猫鼠游戏
-					// "地块一闪一闪"（用户实锤）。更新为新 129² 对象 → v160 检测稳定通过。
-					auto& cgSync = landBuf[landBufIdx.load()][lci][q];
-					cgSync.geom = target;
-					cgSync.verts = nv;
-					cgSync.stride = stride;
-					SKSE::log::info("v207: cell{} quad{} BUILT {}x{} = {} verts rd={}",
-						a_ci, q, n, n, nv, static_cast<void*>(rd));
-				}
-		// v252：**修假成功**——v225 密度门槛用 continue 跳过 quad（built 不递增）但函数
-		// 结尾无条件 return true → 全 skip 时 Tick 认为建成功（coarseSkips 空）→
-		// FinishHighResBuild → "BUILT" 假日志 + highResBuilt=true → 129² 从未替换、
-		// 之后 FindLandscape 也不再触发重建（用户实锤"雪堆效果没有"：v151 全 289）。
-		// 改 built>0 才 true——全 skip 返回 false → coarseSkips 记录 → 阶段 2 每秒
-		// 重缓存重试（引擎/landBuf 数据就绪后自动补建成功）。
-		return built > 0;
-	}
-
-	void SnowShellMesh::TickHighResBuild()
-	{
-		if (!highResBuildQueued.load())
-			return;
-		// v224：5×5 = 25 cell，每帧建 4 个（≈7 帧 ~0.1s 完成，不卡顿）。
-		// **中心优先构建**：从玩家 cell（ci=12）螺旋向外——第一帧就替换玩家脚下，
-		// 边缘最后建（玩家脚下永远先 129²，走动时看到的过渡最短）。
-		// v226：**两阶段自动补建**——主队列建完时引擎低分辨率 LOD（17²/33²）的 cell
-		// 被 v225 密度门槛 skip（记录 coarseSkips）→ 队列保持活动，每 1 秒重缓存
-		// （FindLandscape(true) 读到引擎升级后的 65²）+ 重扫补建 → 引擎稳定后自动补建
-		// 成功。修"走一次有裂缝、来回走才弄平"（用户实锤：引擎流式加载时序，第一次
-		// 路过引擎未稳定 → 129² 与 65²/17² 混合 → 裂缝；补建后全 129² 自动弄平）。
-		// 防死循环：补建只扫 coarseSkips（已建 cell 不碰），skip 清空即完成；
-		// 补建节流 1 秒（引擎升级需要时间，避免每帧重扫浪费）。
-		// v283：**边缘优先构建（预加载）**——用户方案："走在地块1时远处预加载"。
-		// 先建 5×5 外圈（dy/dx=±2 的 16 cell，玩家视野边缘外）→ 中圈（±1 的 8 cell）
-		// → 中心（24）。效果：替换先发生在玩家视野外（远处 cell 提前变 129²），玩家
-		// 到达时已建好 → 视野内无替换 → **不闪**。玩家脚下（中心，已建过）最后重复建
-		// （数据一致 → 无视觉变化）。对比 v224 中心优先（玩家脚下先替换 = 视野内闪）。
-		// v258：7×7 螺旋（49 cell）——中心 ci=24（(dy+3)*7+(dx+3)，dy=dx=0 → 24）
-		static constexpr int kOrder[49] = {
-			// 5×5 外圈（|dy|==2 或 |dx|==2，视野边缘优先替换）
-			8, 9, 10, 11, 12, 36, 37, 38, 39, 40, 15, 22, 29, 19, 26, 33,
-			// 3×3 中圈（|dy|==1 或 |dx|==1）
-			16, 17, 18, 30, 31, 32, 23, 25,
-			// 中心
-			24,
-			// 剩余 land=N 的 ±3 圈（引擎不加载，BuildCell 直接返回）
-			0, 1, 2, 3, 4, 5, 6, 7, 13, 14, 20, 21, 27, 28, 34, 35,
-			41, 42, 43, 44, 45, 46, 47, 48
-		};
-		const auto now = GetTickCount();
-		// 阶段 1：主构建（cursor 0..48）——v226：每帧 4 cell（129² 顶点 16641×4≈6.6 万/帧）
-		if (buildCellCursor < 49) {
-			int done = 0;
-			while (buildCellCursor < 49 && done < 4) {
-				if (!BuildCell(kOrder[buildCellCursor]))
-					coarseSkips.push_back(kOrder[buildCellCursor]);  // 记录待补建
-				else
-					done++;
-				buildCellCursor++;
-			}
-			if (buildCellCursor >= 49 && coarseSkips.empty())
-				FinishHighResBuild();
-			return;
-		}
-		// 阶段 2：skip 处理——v236：**全量重来（同一快照）**。v226 只补建 skip 的 cell
-		// （用新 landBuf 快照）→ 与已建的 cell（旧快照）边界基准不一致 → 裂缝（用户实锤
-		// "CELL 边界走过去有凹陷不闭合"）。改为：skip 非空 → 重缓存（引擎升级后读到
-		// 65²/129²）→ **buildCellCursor=0 全量重建**——每轮 25 cell 同一快照 → 内部一致。
-		// 防死循环：节流 1 秒（引擎升级需要时间）+ skip 清空即完成。
-		if (coarseSkips.empty()) {
-			FinishHighResBuild();
-			return;
-		}
-		// v260：**阶段 2 重试轮次上限**——v258 实锤 7×7 边缘 land=N cell 永远 skip
-		// （BuildCell 已改 return true 不再记录）→ 剩余 coarseSkips 都是"密度不足/数据
-		// 未就绪"的 cell，引擎升级需时间。上限 6 轮（6 秒）后放弃本次重建——玩家移动
-		// 触发新 rebuild 时自然补建，绝不无限循环（防每秒全量重建=闪烁）。
-		if (++stage2Rounds > 6) {
-			SKSE::log::info("v260: stage-2 retry exhausted ({} skips) — finish build", coarseSkips.size());
-			coarseSkips.clear();
-			FinishHighResBuild();
-			return;
-		}
-		if (now - lastRetryTick < 1000)
-			return;  // 节流：每 1 秒重扫一次
-		lastRetryTick = now;
-		// 重缓存（引擎可能已把 17²/33² 升级到 65²/129²）——a_skipBuild=true 不触发 rebuild
-		FindLandscape(true);
-		coarseSkips.clear();
-		buildCellCursor = 0;  // 全量重建（同一快照，边界一致 → 无裂缝）
-	}
-
-	void SnowShellMesh::FinishHighResBuild()
-	{
-		highResBuildQueued.store(false);
-		highResBuilt = true;
-		highResQuad = 3;
-		SKSE::log::info("v258: high-res mesh BUILT (7x7 cells, {}x{} = {} verts each)",
-			highResDim, highResDim,
-			static_cast<std::uint32_t>(highResDim) * highResDim);
-		highResHookLD = nullptr;  // thunk 已废弃，不再用
-		FindLandscape(true);  // 跳过 rebuild（防死循环），只重缓存
-	}
-
-
-	// v196：hook 引擎 BuildQuadTriShape 的调用点（SmoothTerrain 方式）。
-	// 之前 F9 事后替换 rendererData 只 2 块生效（引擎渲染管线已缓存部分旧引用）；
-	// 改为在引擎每次构建/重建 quad 网格的瞬间 setMesh 换成缓存的 255²/181² 数据——
-	// 渲染管线拿到的永远是最新对象 → 根治"只认 2 块"。
-	// REL ID（SmoothTerrain Offsets.hpp 移植）：
-	//   K_BUILD_LAND_GEOMETRY(18334, 18750)  AE=18750：land geometry init 调用 builder
-	//   K_BUILD_QUAD_TRISHAPE(18380, 18806)  AE=18806：真正建 quad 网格的引擎函数
-	// 在 K_BUILD_LAND_GEOMETRY 函数体内扫描 call BuildQuadTriShape 的指令 → redirect。
-	RE::BSTriShape* (*SnowShellMesh::s_origBuildQuad)(RE::TESObjectLAND::LoadedLandData*, std::uint32_t) = nullptr;
-
-	// thunk：先调原函数（引擎构建原版 quad 网格），再 setMesh 换成我们的高密度网格
-	RE::BSTriShape* SnowShellMesh::BuildQuadHookThunk(RE::TESObjectLAND::LoadedLandData* a_data, std::uint32_t a_quad)
-	{
-		// 原函数：引擎先构建原版（17×17/65×65 等）quad 网格
-		auto* shape = SnowShellMesh::s_origBuildQuad ? SnowShellMesh::s_origBuildQuad(a_data, a_quad) : nullptr;
-		if (!shape || !a_data || a_quad >= 4)
-			return shape;
-		auto& shell = SnowDeform::GetSnowShellMesh();
-		// 只替换玩家 cell（高密度缓存已建 + ld 匹配）——其他 cell 保持引擎原网格
-		if (!shell.highResBuilt || a_data != shell.highResHookLD)
-			return shape;
-		if (shell.highResVerts[0][a_quad].empty() || shell.highResIdx.empty())
-			return shape;
-		// v198：每次从缓存重建 rd/ib（不直接复用 highResRd——引擎析构旧 shape 时
-		// 会释放其 rendererData（引用计数），复用缓存的 rd = 悬空 → 崩）。
-		// SmoothTerrain 也是每次重建（buildSmoothedMesh → createTSD）。
-		const std::uint32_t n = shell.highResDim;
-		const std::uint32_t nv = n * n;
-		const std::uint32_t nt = (n - 1) * (n - 1) * 2;
-		auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-		if (!renderer)
-			return shape;
-		static constexpr REL::RelocationID kCreateIB(75503, 77294);
-		static constexpr REL::RelocationID kCreateTSD(75475, 77261);
-		using CreateIndexBuffer_t = void*(RE::BSGraphics::Renderer*, std::uint32_t, const std::uint16_t*);
-		using CreateTriShapeData_t = void*(RE::BSGraphics::Renderer*, const void*, std::uint32_t, std::uint64_t, void*);
-		static const REL::Relocation<CreateIndexBuffer_t> createIB{ kCreateIB };
-		static const REL::Relocation<CreateTriShapeData_t> createTSD{ kCreateTSD };
-		void* ib = createIB(renderer, nt * 3, shell.highResIdx.data());
-		if (!ib)
-			return shape;
-		const auto vertexDesc = std::bit_cast<std::uint64_t>(shape->GetGeometryRuntimeData().vertexDesc);
-		void* rd = createTSD(renderer, shell.highResVerts[0][a_quad].data(),
-			static_cast<std::uint32_t>(shell.highResVerts[0][a_quad].size()),
-			vertexDesc, ib);
-		if (!rd)
-			return shape;
-		auto& gd2 = shape->GetGeometryRuntimeData();
-		auto& td2 = shape->GetTrishapeRuntimeData();
-		gd2.rendererData = static_cast<RE::BSGraphics::TriShape*>(rd);
-		td2.vertexCount = static_cast<std::uint16_t>(nv);
-		td2.triangleCount = static_cast<std::uint16_t>(nt);
-		auto& mb2 = shape->GetModelData().modelBound;
-		mb2.center = RE::NiPoint3(
-			(a_quad & 1) ? 1024.0f : -1024.0f,
-			(a_quad & 2) ? 1024.0f : -1024.0f,
-			0.0f);
-		mb2.radius = 1500.0f;
-		SKSE::log::info("v198: quad{} setMesh hooked ({}x{} = {} verts)", a_quad, n, n, nv);
-		return shape;
-	}
-
-	// v559：**投射物命中（箭矢 + 法术爆炸）**——hook ArrowProjectile/MissileProjectile
-	// vtable 槽 0xBD（AddImpact 命中回调，参数 a_loc = 命中世界坐标）。命中 → 写
-	// footprints（shape 12=箭矢小坑+雪堆 / 13=法术爆炸大坑+环形雪堆）→ 走 RebuildField
-	// 场写入 → 地形变形。AddImpact 在游戏线程调用（引擎主循环），footMtx 保护写。
-	SnowShellMesh::AddImpactFn SnowShellMesh::g_addImpactArrow = nullptr;
-	SnowShellMesh::AddImpactFn SnowShellMesh::g_addImpactMissile = nullptr;
-
 	void SnowShellMesh::HandleProjectileImpact(RE::Projectile* self, const RE::NiPoint3& a_loc, int a_shape)
 	{
+		(void)self;  // v565：C4100
 		// 玩家距离过滤（远处命中无视觉，省场写入）
 		const auto* pc = RE::PlayerCharacter::GetSingleton();
 		if (!pc)
@@ -1338,12 +650,19 @@ namespace SnowDeform
 		const auto pp = pc->GetPosition();
 		if ((a_loc - pp).Length() > 2048.0f)
 			return;
-		// 冷却：爆炸 250ms（连发法术不爆场）、箭 100ms
-		static unsigned long lastProjT = 0;
+		// 冷却：爆炸 250ms（连发法术不爆场）、箭 100ms——v569：**分离**（原共用
+		// lastProjT：爆炸后 250ms 内的箭被吞、箭后 100ms 内爆炸被吞）
+		static unsigned long lastArrowT = 0, lastBoomT = 0;
 		const unsigned long nowT = GetTickCount();
-		if (nowT - lastProjT < (a_shape == 13 ? 250u : 100u))
-			return;
-		lastProjT = nowT;
+		if (a_shape == 13) {
+			if (nowT - lastBoomT < 250)
+				return;
+			lastBoomT = nowT;
+		} else {
+			if (nowT - lastArrowT < 100)
+				return;
+			lastArrowT = nowT;
+		}
 		// 盖章参数：箭 = 物品同款小坑（rL/rS=8 战壕 40 宽）；爆炸 = 大坑（r=40）+ 环形雪堆
 		const float depth = (a_shape == 13) ? 1.2f : 0.5f;
 		const float rL = (a_shape == 13) ? 40.0f : 8.0f;
@@ -1375,6 +694,10 @@ namespace SnowDeform
 		if (g_addImpactMissile)
 			g_addImpactMissile(self, a_ref, a_loc, a_vel, a_col, a6, a7);
 	}
+
+	// v565：static 数据成员定义（原在高密死链内被连带删除——AddImpactHook* 活函数引用）
+	SnowShellMesh::AddImpactFn SnowShellMesh::g_addImpactArrow = nullptr;
+	SnowShellMesh::AddImpactFn SnowShellMesh::g_addImpactMissile = nullptr;
 
 	void SnowShellMesh::InstallProjectileHook()
 	{
@@ -1623,6 +946,7 @@ namespace SnowDeform
 	// 只在 landReady 后读 idx 指向的缓冲——FindLandscape 改写与遍历零竞争）。
 	void SnowShellMesh::FindLandscape(bool a_skipBuild)
 	{
+		(void)a_skipBuild;  // v565：C4100
 		const auto player = RE::PlayerCharacter::GetSingleton();
 		if (!player)
 			return;
@@ -1648,8 +972,7 @@ namespace SnowDeform
 		// 删除：re-caching 期间渲染线程继续用旧缓存（旧 landAnchor，盒子偏移
 		// ≤512 仍在 4700² 覆盖内），新缓冲就绪原子切换 → 无消失、无闪。
 		landPaused.store(false);  // v149：新缓存恢复（退出实验模式）
-		landAnchorX.store(pos.x);
-		landAnchorY.store(pos.y);
+
 		const int oldIdx = landBufIdx.load();
 		const int newIdx = 1 - oldIdx;
 		auto& cells = landBuf[newIdx];
@@ -1719,8 +1042,8 @@ namespace SnowDeform
 					D3D11_BUFFER_DESC bd{};
 					vb->GetDesc(&bd);
 					stride = bd.ByteWidth / vc;
-					auto* wm = reinterpret_cast<const float*>(
-						reinterpret_cast<std::uintptr_t>(g) + 0x07C);
+					if (stride == 0)  // v569：ByteWidth 异常时 stride=0 → orig 空 vector → 越界读
+						continue;
 					auto& lc = cells[ci][q];
 					lc.geom = g;
 					lc.raw = raw;
@@ -1762,7 +1085,7 @@ namespace SnowDeform
 					// rebuild（512 移动触发）都跑 0.5s + 改边界 orig → mesh.child 替换瞬间
 					// 边界高度跳变 → "闪 + 凹凸消失一秒"（用户实锤）。首次覆盖后边界已贴地
 					// （静态），后续 rebuild 用稳定 orig → 不跳变不闪。
-					if (std::abs(dx) == 2 || std::abs(dy) == 2 && !landHLogged) {
+					if ((std::abs(dx) == 2 || std::abs(dy) == 2) && !landHLogged) {  // v568：优先级修复——原 A||B&&C 使 dx==2 边缘 cell 每次都跑 GetLandHeight 0.5s（v280"只首次"失效）
 						if (vc == highResDim * highResDim) {
 							landHLogged = true;  // v280：只首次（0.5s 一次性）
 							auto* tesG = RE::TES::GetSingleton();
@@ -1875,8 +1198,15 @@ namespace SnowDeform
 		if (found > 0) {
 			// 新缓冲填完 → 原子切换 + 就绪
 			landBufIdx.store(newIdx);
+			// v569：**先切缓冲再更新 anchor**——原顺序 anchor 先 store、idx 后 store：
+			// 渲染线程窗口内读"新 anchor + 旧 idx 缓冲" → cells 用旧缓冲但锚点已新
+			// → 盖章偏移 1 帧。先切 idx（渲染线程 cells 引用新完整缓冲）再更新 anchor
+			// （距离检测延迟 1 帧，无害）。
+			landAnchorX.store(pos.x);
+			landAnchorY.store(pos.y);
 			landReady.store(true);
 			landFootDirty.store(true);   // v197：新缓存 → 下一帧全量重算上传
+			landRebuildPending.store(true);  // v567：修复——原 v197 注释说"FindLandscape 后置 true"但代码从未置位 → firstFullUp 永不重置 → 重缓存后沙丘基线不落 GPU
 			// v435：场景雪堆场随重缓存重建（同线程，静态物碰撞只读安全）
 			BuildSceneLift();
 			SKSE::log::info("v130: landscape ready ({} geoms / {} cells at {:.0f},{:.0f})",
@@ -1888,7 +1218,6 @@ namespace SnowDeform
 				static bool landEdgeLogged = false;
 				if (!landEdgeLogged) {
 					landEdgeLogged = true;
-					const int n = static_cast<int>(highResDim);
 					for (int q = 0; q < 4; q++) {
 						auto& lc = cells[24][q];
 						if (!lc.orig.size())
@@ -2073,7 +1402,7 @@ namespace SnowDeform
 				const char qw = localY > 2048.0f ? 'N' : 'S';
 				for (int qd = 0; qd < 4; qd++) {
 					const auto& cg = cells[24][qd];
-					if (!cg.geom)
+					if (!cg.geom || cg.verts < 2)  // v569：verts<2 防 (verts-1) uint32 下溢越界读
 						continue;
 					const float gx = cg.worldT[0], gy = cg.worldT[1];
 					const auto* v0 = reinterpret_cast<const float*>(cg.orig.data());
@@ -2139,7 +1468,7 @@ namespace SnowDeform
 		}
 		const auto player = RE::PlayerCharacter::GetSingleton();
 		if (!player) {
-			fieldReady = false;
+			fieldReady.store(false);
 			return;
 		}
 		const auto pos = player->GetPosition();
@@ -2375,7 +1704,6 @@ namespace SnowDeform
 							const float npx = fp.prevX + segDx * t;
 							const float npy = fp.prevY + segDy * t;
 							const float qx = wx - npx, qy = wy - npy;
-							const float qd2 = qx * qx + qy * qy;
 							// v294：胶囊横截面 = 真实鞋宽半轴 ×1.5（战壕宽 = 3×rS；
 							// CS 战壕比单脚宽，挤出+滑动形成宽沟），保底 18（宽 36）
 							// v341：**×1.5 去掉**——rS=18 → rTr=27 → 战壕宽 54，但端点
@@ -2401,7 +1729,7 @@ namespace SnowDeform
 							// （鞋头窄/鞋跟窄/足弓空，全按真实鞋底形状）。
 							const bool maskMode = (fp.shape == 1 || fp.shape == 2);
 							const ShapeStamp& shT = maskMode ? ((fp.shape == 1) ? shL : shR) : shL;
-							if (maskMode && shT.valid && shT.maskDim > 0) {
+							if (maskMode && shT.valid && shT.maskDim > 0 && !shT.mask.empty()) {  // v569：与 1853 防御一致
 								const float al = (wx - npx) * shT.dirX + (wy - npy) * shT.dirY;
 								const float ac = (wx - npx) * (-shT.dirY) + (wy - npy) * shT.dirX;
 								const float uf = (al / shT.len + 0.5f) * shT.maskDim;
@@ -2549,13 +1877,14 @@ namespace SnowDeform
 								const float mv = sh.mask[static_cast<std::size_t>(v) * sh.maskDim + u];
 								if (mv > 0.5f) {
 									// v430：鞋底满深同乘 fp.depth（回填渐变，见战壕注释）
-									d = fp.depth;  // 鞋底内满深（真实鞋形，比椭圆更精确）
+									// v569：漏乘 decay——战壕/椭圆分支都乘了，鞋形主坑永不衰减 → 永久坑
+									d = fp.depth * decay;  // 鞋底内满深（真实鞋形，比椭圆更精确）
 								} else {
 									// 鞋边 1 cell 内 → 挤出雪堆（黑神话鞋印周围隆起）
 									bool isNear = false;
-									for (int dy = -1; dy <= 1 && !isNear; ++dy)
-										for (int dx = -1; dx <= 1 && !isNear; ++dx) {
-											const int nu = u + dx, nv = v + dy;
+									for (int dy2 = -1; dy2 <= 1 && !isNear; ++dy2)
+										for (int dx2 = -1; dx2 <= 1 && !isNear; ++dx2) {
+											const int nu = u + dx2, nv = v + dy2;
 											if (nu >= 0 && nu < sh.maskDim && nv >= 0 && nv < sh.maskDim &&
 												sh.mask[static_cast<std::size_t>(nv) * sh.maskDim + nu] > 0.5f)
 												isNear = true;
@@ -2589,6 +1918,7 @@ namespace SnowDeform
 			}
 		}
 		}  // v382: footMtx unlock (fp loop scope)
+
 		// v438：**拉普拉斯平滑（对齐 CS HeightMapProcessCS blur）**——用户"三角尖刺
 		// 感很大/不圆润"：坑半径 10~18 在场 8 格上只覆盖 3-5 点，双线性采样仍会
 		// 出小尖峰；CS 深度图有 blur pass 摊平。这里对 deform/ridge 做 1 次轻平滑：
@@ -2643,14 +1973,14 @@ namespace SnowDeform
 				}
 			}
 		}
-		fieldReady = true;
+		fieldReady.store(true);
 	}
 
 	void SnowShellMesh::SampleField(float wx, float wy, float& deformOut, float& ridgeOut) const
 	{
 		deformOut = 0.0f;
 		ridgeOut = 0.0f;
-		if (!fieldReady || deformField.empty())
+		if (!fieldReady.load() || deformField.empty())
 			return;
 		// v429（0.5 分支）：**恢复 v296 双线性采样**（v423 的 B-spline 撤销）——
 		// 0.5 原版就是双线性（v296 无 B-spline），恢复原版采样行为。
@@ -2687,7 +2017,7 @@ namespace SnowDeform
 	{
 		deformOut = 0.0f;
 		ridgeOut = 0.0f;
-		if (!fieldReady || deformFieldObj.empty())
+		if (!fieldReady.load() || deformFieldObj.empty())
 			return;
 		const float step = kFieldStep;
 		const float fx = (wx - fieldOriginX) / step;
@@ -2718,6 +2048,60 @@ namespace SnowDeform
 	// v435：前向声明（GetColliderBound 定义在 2449 行——v346 Havok 碰撞体包围球，
 	// 只读碰撞体安全，BuildSceneLift 需在本定义之前调用）
 	static bool GetColliderBound(RE::bhkNiCollisionObject* a_obj, RE::NiPoint3& a_center, float& a_radius);
+
+	// v564（帧数优化，2026-08-27）：**最近邻采样**——原双线性 4 次场读取（tx/ty
+	// 插值）。kFieldStep=4 且场原点对齐 4 网格（v2147），quadrant 顶点世界坐标 =
+	// cellX*4096 + 2048 + i*step（32/64/128 全 4 的倍数）→ 顶点精确落在场点上 →
+	// 最近邻 = 双线性在网格点上的精确值（零误差）。floor(fx+0.5) 四舍五入取最近
+	// 场点（防浮点误差差半格）。热路径（顶点循环每帧 8-15 万次 ×2 场）4 读→1 读。
+	void SnowShellMesh::SampleFieldNearest(float wx, float wy, float& deformOut, float& ridgeOut) const
+	{
+		deformOut = 0.0f;
+		ridgeOut = 0.0f;
+		if (!fieldReady.load() || deformField.empty())
+			return;
+		const float fx = (wx - fieldOriginX) / kFieldStep;
+		const float fy = (wy - fieldOriginY) / kFieldStep;
+		const int x0 = static_cast<int>(std::floor(fx + 0.5f));
+		const int y0 = static_cast<int>(std::floor(fy + 0.5f));
+		const int dim = kFieldDim;
+		if (x0 < 0 || y0 < 0 || x0 >= dim || y0 >= dim) {
+			const int cx = std::clamp(x0, 0, dim - 1);
+			const int cy = std::clamp(y0, 0, dim - 1);
+			const auto i0 = static_cast<std::size_t>(cy) * dim + cx;
+			deformOut = deformField[i0];
+			ridgeOut = ridgeField[i0];
+			return;
+		}
+		const auto i0 = static_cast<std::size_t>(y0) * dim + x0;
+		deformOut = deformField[i0];
+		ridgeOut = ridgeField[i0];
+	}
+
+	// v564：物体场（物品/拖痕/深坑）最近邻，同款（v529 场通道分离保持）。
+	void SnowShellMesh::SampleFieldObjNearest(float wx, float wy, float& deformOut, float& ridgeOut) const
+	{
+		deformOut = 0.0f;
+		ridgeOut = 0.0f;
+		if (!fieldReady.load() || deformFieldObj.empty())
+			return;
+		const float fx = (wx - fieldOriginX) / kFieldStep;
+		const float fy = (wy - fieldOriginY) / kFieldStep;
+		const int x0 = static_cast<int>(std::floor(fx + 0.5f));
+		const int y0 = static_cast<int>(std::floor(fy + 0.5f));
+		const int dim = kFieldDim;
+		if (x0 < 0 || y0 < 0 || x0 >= dim || y0 >= dim) {
+			const int cx = std::clamp(x0, 0, dim - 1);
+			const int cy = std::clamp(y0, 0, dim - 1);
+			const auto i0 = static_cast<std::size_t>(cy) * dim + cx;
+			deformOut = deformFieldObj[i0];
+			ridgeOut = ridgeFieldObj[i0];
+			return;
+		}
+		const auto i0 = static_cast<std::size_t>(y0) * dim + x0;
+		deformOut = deformFieldObj[i0];
+		ridgeOut = ridgeFieldObj[i0];
+	}
 
 	// v435：**场景雪堆（墙边/岩石边自动堆雪）**——游戏线程（FindLandscape 末尾）重建：
 	// 1) ForEachReferenceInRange 收集玩家周围静态（kStatic）REFR 的最大碰撞包围球
@@ -3334,16 +2718,20 @@ namespace SnowDeform
 				return RE::BSContainer::ForEachResult::kContinue;  // 无脚/单脚节点跳过
 			// 盖章：每脚（最多 4），脚世界位置，距上次盖章点 > 20 才盖
 			const unsigned long nowA = GetTickCount();
+			// v569：**节流移到调用级**——原 `nowA-lastAT>=300` 在每脚循环内：第一脚
+			// 盖章后 lastAT=nowA → 同次调用后续脚 0<300 永假 → 每调用只盖 1 脚（多动物
+			// 只盖第一个）。调用级节流：整次调用 <300ms 跳过，通过后 4 脚都盖。
+			if (nowA - lastAT < 300)
+				return RE::BSContainer::ForEachResult::kContinue;
 			int stamped = 0;
 			for (auto* fn : feet) {
 				if (stamped >= 4)
 					break;
 				const auto fpw = fn->world.translate;  // 脚节点世界位置（NiAVObject::world）
 				const float dx = fpw.x - lastAX, dy = fpw.y - lastAY;
-				if (nowA - lastAT >= 300 && dx * dx + dy * dy > 20.0f * 20.0f) {
+				if (dx * dx + dy * dy > 20.0f * 20.0f) {
 					lastAX = fpw.x;
 					lastAY = fpw.y;
-					lastAT = nowA;
 					{
 						auto& shell = SnowDeform::GetSnowShellMesh();
 						std::lock_guard<std::mutex> lk(shell.footMtx);
@@ -3354,6 +2742,7 @@ namespace SnowDeform
 					stamped++;
 				}
 			}
+			lastAT = nowA;  // v569：调用后更新（同调用内 4 脚都盖）
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
 	}
@@ -3438,12 +2827,17 @@ namespace SnowDeform
 					// depth 拉高（深坑 n=4 → min(1.0,4.12)=1.0 满深）→ 脚印变深/变样。
 					float depth = 0.6f;
 					constexpr float kOverlapR = 55.0f;
-					for (const auto& f2 : footprints) {
-						if (f2.shape > 3)
-							continue;  // v528：物品(9)/拖痕(11)/深坑(10)不参与玩家加深
-						const float dx2 = f2.x - st.x, dy2 = f2.y - st.y;
-						if (dx2 * dx2 + dy2 * dy2 < kOverlapR * kOverlapR)
-							depth = std::max(depth, std::min(1.0f, f2.depth + 0.12f));
+					{
+						// v569：加锁——ScanColliders 游戏线程遍历 vs 渲染线程 RebuildField
+						// 持 footMtx 读/写 → 无锁遍历 = 迭代器失效崩溃（push_back 扩容时）
+						std::lock_guard<std::mutex> lkF3(footMtx);
+						for (const auto& f2 : footprints) {
+							if (f2.shape > 3)
+								continue;  // v528：物品(9)/拖痕(11)/深坑(10)不参与玩家加深
+							const float dx2 = f2.x - st.x, dy2 = f2.y - st.y;
+							if (dx2 * dx2 + dy2 * dy2 < kOverlapR * kOverlapR)
+								depth = std::max(depth, std::min(1.0f, f2.depth + 0.12f));
+						}
 					}
 					const float r = std::max(5.0f, std::min(14.0f, st.radius));
 					// v437b：**碰撞体形状半轴（椭圆战壕/椭圆鞋印）**——v436 想用鞋网格
@@ -3468,7 +2862,7 @@ namespace SnowDeform
 					}
 					// v382：footprints 写锁（游戏线程 vs 渲染线程读）
 					{
-						std::lock_guard<std::mutex> lk(footMtx);
+						std::lock_guard<std::mutex> lockF(footMtx);
 						footprints.push_back({ st.x, st.y, depth, 0.0f, ddx, ddy, fpRL, fpRS, st.px, st.py, fpShape, GetTickCount() });  // v554：玩家脚印记录 tMs（按时间回填 600s）
 						// v562：脚印贴花调用已移除（v561 系列全删）
 						// v558q：**粒子特效全部移除（用户拍板"所有粒子特效内容全部删掉"）**——
@@ -3909,11 +3303,8 @@ namespace SnowDeform
 			const unsigned long nowDbg = GetTickCount();
 			if (nowDbg - lastObjDbg >= 3000) {
 				lastObjDbg = nowDbg;
-				const int lagN = gPosLagN.load(std::memory_order_relaxed);
-				const int shN = gShapesN.load(std::memory_order_relaxed);
 				// v465-dbg：+rebObjFoot/rebObjWrite（RebuildField 物品脚印采样数/实际
 				// 写入数——增长 = 物品坑真实进场；foot 涨但 write 不涨 = 物品分支没写）
-				const int dxN = gObjPosN.load(std::memory_order_relaxed);
 				const int crN = gObjCradN.load(std::memory_order_relaxed);
 				const int gpN = gObjGapN.load(std::memory_order_relaxed);
 				// v467-dbg：**物品盖章全链路检测（CS pr2659 逐条对齐）**——
@@ -4226,9 +3617,9 @@ namespace SnowDeform
 		auto* cell = tes ? tes->GetCell(pc->GetPosition()) : nullptr;
 		if (!cell)
 			return;
-		RE::NiAVObject* root = cell->GetRuntimeData().loadedData ?
+		RE::NiAVObject* root3D = cell->GetRuntimeData().loadedData ?
 			cell->GetRuntimeData().loadedData->cell3D.get() : nullptr;
-		if (!root)
+		if (!root3D)
 			return;
 		int count = 0;
 		RE::BSVisit::TraverseScenegraphCollision(root, [&](RE::bhkNiCollisionObject* obj) -> RE::BSVisit::BSVisitControl {
@@ -4375,7 +3766,6 @@ namespace SnowDeform
 		// （181²×4=13 万顶点全量遍历+上传 = 帧率减半元凶）。盖章（新脚印）时
 		// landFootDirty 置 true → 本帧全量重算+上传；无新脚印时跳过整个顶点
 		// 循环（v160 检测仍在下面跑，重缓存后置 dirty 恢复重算）。
-		bool doFullUpdate = false;
 		// cell 切换检测：玩家移动 >512 单位（约 1/8 cell）→ 重新缓存 3×3。
 		// v135：1024→512——引擎的 65×65 高分辨率 quadrant 跟随玩家（带滞后），
 		// 缩小触发距离能更快捕获玩家脚下的高分辨率网格（细腻坑尽早出现）
@@ -4660,10 +4050,26 @@ namespace SnowDeform
 		// 静息区重算+上传，回填视觉更新）。1 次/s × 10ms ≈ 1% 帧预算。
 		static unsigned long lastFullT = 0;
 		const unsigned long nowF = GetTickCount();
-		const bool fullDue = nowF - lastFullT >= 1000;
+		// v567（性能修复）：**fullDue 1s 兜底禁用**——原用途是"物品回填衰减（场每帧
+		// 变）每 1s 强制全量刷新"，但回填代码已注释禁用（fp.depth 衰减 + erase，3995
+		// 上方）→ 场不再每帧变化 → fullDue 全量重算结果不变 = 白算（每 1s 一次 10ms
+		// 浪费 + 全量上传可能闪）。禁用后非 dirty 帧完全跳过（land=0）。物品移动
+		// 盖章走 dirty 路径（landFootDirty），不受影响。回填复活时恢复此兜底。
+		const bool fullDue = false;
 		if (fullDue)
 			lastFullT = nowF;
-		if (!landFootDirty.exchange(false) && !landRebuildPending.load() && !fullDue)
+		// v564（帧数优化）：**dirty 帧限频 100ms**——盖章 16-31/s 每步置 dirty →
+		// 每次全量重算+上传（顶点循环 13 万×2 场采样 + ConeCS + 法线 ≈ 5-9ms）。
+		// 限频后全量最多 10 次/s（与 RebuildField 150ms 同频），盖章到几何生效
+		// 延迟 ≤100ms（原 RebuildField 已有 150ms，无新增）。未到期 → 恢复 dirty
+		// 下一帧处理；fullDue 1s 兜底（物品回填视觉）不受影响。
+		static unsigned long lastDirtyT = 0;
+		const bool dirtyDue = landFootDirty.load() && nowF - lastDirtyT >= 100;
+		if (landFootDirty.exchange(false) && !dirtyDue)
+			landFootDirty.store(true);  // 限频未到 → 恢复标志，下一帧处理
+		if (dirtyDue)
+			lastDirtyT = nowF;
+		if (!dirtyDue && !landRebuildPending.load() && !fullDue)
 			return;
 		// v407：**RebuildField 限频 100ms→150ms（v550b 恢复）**——场重建最多 ~6.7 次/秒
 		{
@@ -4717,18 +4123,18 @@ namespace SnowDeform
 		// 目的：a) 抗引擎 LOD 刷新吃掉 17×17 象限的抬高（0.08s 内恢复 → 棋盘格消失）；
 		// b) 避免 v138 每帧全量 6MB/100 次 UpdateSubresource 导致 GPU 队列积压 → TDR
 		// 闪退/扯拉。有脚印的 geom（玩家附近）仍每帧实时上传（坑实时）。
-		static int landUploadPass = 0;
-		const int pass = landUploadPass;
-		landUploadPass = (landUploadPass + 1) % 5;
 		// v548：缓存后首帧全量上传标志（沙丘基线落 GPU）——重缓存后重置
 		static bool firstFullUp = true;
-		if (landRebuildPending.load())
+		if (landRebuildPending.exchange(false))  // v567：exchange 一次性取走（消费后清，防永久强制全量）
 			firstFullUp = true;
 		const auto tVt0 = clkLd::now();  // v545：geom 顶点循环计时起点
-		int geomSeq = 0;
+		// v567：**ConeCS 降频计数移到循环外**——v564 放循环内导致每 geom 都 ++
+		// （4 quad × N cell 快速消耗计数 → 频率语义错误）。现在每帧 1 次：每
+		// 4 个 dirty 帧全量 ConeCS 一次（所有 geom 一起，延迟 1-3 帧无感）。
+		static int sCone564 = 0;
+		const bool coneDue = (sCone564++ & 3) == 0;
 		for (int ci = 0; ci < 49; ci++) {
 			for (int q = 0; q < 4; q++) {
-				const int gi = geomSeq++;
 				auto& lc = cells[ci][q];
 				auto* raw = lc.raw;
 				const auto vc = lc.verts;
@@ -4782,9 +4188,6 @@ namespace SnowDeform
 				// 间距 64、65×65（4225）间距 32；低分辨率网格的坑半径放大（≥2×2 顶点）
 				// 才可见，否则坑落在 1 个顶点上完全看不出凹陷。
 				// v190：高密度网格（255²=65025）间距 8.06
-				const float spacing = (vc == highResDim * highResDim) ?
-					2048.0f / static_cast<float>(highResDim - 1) :
-					((vc == 4225) ? 32.0f : (vc == 1089) ? 64.0f : 128.0f);
 				// v147：写 work 副本（不写 raw——v146 5×5 大范围写 raw，边缘 cell geom 被
 				// 引擎重建 → raw 悬空 → 闪退）。上传 work 副本到 vb。
 				std::uint32_t deformed = 0;
@@ -4826,13 +4229,13 @@ namespace SnowDeform
 				float deform = 0.0f;
 				float ridge = 0.0f;
 				float sceneLift = 0.0f;
-				SampleField(wx, wy, deform, ridge);
+				SampleFieldNearest(wx, wy, deform, ridge);  // v564：最近邻（4 读→1 读，顶点对齐零误差）
 				// v529：**场通道分离合成（用户"武器盖章覆盖脚下导致脚印变化，互不影响"）**——
 				// 玩家脚印场优先：有玩家变形（deform>阈值）显示玩家脚印；无脚印区域
 				// 用物体场（物品/拖痕/深坑）→ 脚印不被拖痕覆盖、拖痕独立呈现。
 				{
 					float deformObj = 0.0f, ridgeObj = 0.0f;
-					SampleFieldObj(wx, wy, deformObj, ridgeObj);
+					SampleFieldObjNearest(wx, wy, deformObj, ridgeObj);  // v564
 					// v530：**坑玩家优先 + 雪堆叠加（用户"拖拽没看到雪堆"实锤）**——
 					// v529 玩家优先把 obj 场（拖痕/物品/深坑）的沟和雪堆整块遮掉：
 					// 拖武器走路时刀尖就在玩家脚边 → deform>0.05 脚印区 → 拖痕全
@@ -4889,7 +4292,10 @@ namespace SnowDeform
 				// 1.7）。正确：**凸起（h>orig）用坡度受限值，凹陷（h≤orig）保留合成
 				// 下陷**（max(orig) 的防穿透语义只对凸起雪堆有意义）。
 				// v547：回退 v534m——ConeCS 全量（无增量跳过）
-				if (!nearFp.empty() && vc == highResDim * highResDim) {
+				// v564：**ConeCS 降频 1/4**——全量每 dirty 帧跑（129² 顶点 × 多尺度
+				// 8 邻域 ≈ 1-2ms）。坡度修正是低频视觉操作（削陡壁棱角），延迟
+				// 1-3 帧（33-100ms）无感。static 计数 & 3 每 4 个 dirty 帧跑 1 次。
+				if (coneDue && !nearFp.empty() && vc == highResDim * highResDim) {
 					const auto n = static_cast<int>(highResDim);
 					const float spacing = 2048.0f / static_cast<float>(n - 1);
 					// v450：**坡面陡度按材质**——雪 1.0（45° 陡壁）；沙 0.5（~27°
@@ -5141,9 +4547,9 @@ namespace SnowDeform
 				{
 					const float ox = gObjLastX.load(std::memory_order_relaxed);
 					const float oy = gObjLastY.load(std::memory_order_relaxed);
-					const auto pc = RE::PlayerCharacter::GetSingleton();
-					const float pdx = pc ? ox - pc->GetPosition().x : 0.0f;
-					const float pdy = pc ? oy - pc->GetPosition().y : 0.0f;
+					const auto pChar = RE::PlayerCharacter::GetSingleton();
+					const float pdx = pChar ? ox - pChar->GetPosition().x : 0.0f;
+					const float pdy = pChar ? oy - pChar->GetPosition().y : 0.0f;
 					const float pDist = std::sqrt(pdx * pdx + pdy * pdy);
 					if (gObjStamps.load(std::memory_order_relaxed) > 0 && pDist > 200.0f) {
 						const auto fvAt = [&](float wx, float wy) -> float {
@@ -5199,15 +4605,20 @@ namespace SnowDeform
 					// SampleField≈0 而 fvAt≈1.1 → fieldOrigin/场索引 bug 实锤（顶点
 					// 应用采样到场的空区 → 玩家 cell 永不显示拖痕/脚印）。
 					float sfDeform = 0.0f, sfRidge = 0.0f;
-					SampleFieldObj(wx2, wy2, sfDeform, sfRidge);  // v529：拖痕在 obj 场
+					SampleFieldObjNearest(wx2, wy2, sfDeform, sfRidge);  // v529：拖痕在 obj 场；v564 最近邻
 					// 最近 quad 顶点实测（玩家 cell 4 quad 找最近顶点）
 					float bestV = 1.0e9f;
 					float sinkV = -9999.0f;
 					for (int qd2 = 0; qd2 < 4; qd2++) {
 						auto& cgV = cells[24][qd2];
-						if (!cgV.raw || cgV.verts == 0 || cgV.work.size() < 40)
+						if (!cgV.raw || cgV.verts == 0)
 							continue;
+						// v569：强守卫——原 `work.size()<40` 弱守卫：size≥40 但 <stride*verts
+						// 时 vi2*wStrideV 越界读（最多 ~240KB）。全量校验 work/orig。
 						const auto wStrideV = cgV.stride ? cgV.stride : 40u;
+						const auto needV = static_cast<std::size_t>(wStrideV) * cgV.verts;
+						if (cgV.work.size() < needV || cgV.orig.size() < needV)
+							continue;
 						for (std::uint32_t vi2 = 0; vi2 < cgV.verts && vi2 < 6000; vi2++) {
 							const auto* posV = reinterpret_cast<const float*>(
 								cgV.work.data() + static_cast<std::size_t>(vi2) * wStrideV);
@@ -5250,6 +4661,11 @@ namespace SnowDeform
 							auto& cg0 = cells[24][qd];
 							if (!cg0.geom || !cg0.raw || cg0.work.size() < 40 || cg0.verts <= 10)
 								continue;
+							// v569：SafeGeomValid——诊断块在主循环可能被跳过（nearFp 空/
+							// 材质/距离）→ geom 未被置 null → 引擎 LOD 重建后悬空 → UAF 崩
+							std::uint32_t curVc0 = 0;
+							if (!SafeGeomValid(cg0.geom, cg0.verts, curVc0))
+								continue;
 							const auto* rd0 = cg0.geom->GetGeometryRuntimeData().rendererData;
 							auto* rawP = rd0 ? *reinterpret_cast<std::uint8_t**>(
 								reinterpret_cast<std::uintptr_t>(rd0) + 0x20) : nullptr;
@@ -5281,9 +4697,9 @@ namespace SnowDeform
 			// lc.geom = 引擎重建的 17² 对象（≠我们替换的 129² 渲染对象）→ 变形上传到
 			// 不在渲染的 vb → 凹陷不可见。v270：索引 12→24（v258 改 7×7 后中心=24）。
 			for (int qd = 0; qd < 4; qd++) {
-				auto& pc = cells[24][qd];
+				auto& qc = cells[24][qd];
 				SKSE::log::info("v233: player cell q{} cachedVerts={} geom={} raised={}",
-					qd, pc.verts, static_cast<void*>(pc.geom), pc.raised);
+					qd, qc.verts, static_cast<void*>(qc.geom), qc.raised);
 			}
 			// v276：**静息贴地诊断**——v275 边缘淡出后"还是有"裂缝 → 怀疑不是"变形切"
 			// 而是"静息高度差"（无坑时 129² 与引擎网格高度基准差）。取 5×5 边缘 cell
@@ -5296,25 +4712,7 @@ namespace SnowDeform
 				auto& lcE = cells[ciE][1];              // q1（东侧 quadrant）
 				if (tes && lcE.verts == highResDim * highResDim &&
 					lcE.work.size() >= static_cast<std::size_t>(lcE.stride) * lcE.verts) {
-					const int nn = static_cast<int>(highResDim);
-					const int rM = nn / 2;
-					const int cE = nn - 1;
-					const auto* p = reinterpret_cast<const float*>(
-						lcE.work.data() + static_cast<std::size_t>(rM * nn + cE) * lcE.stride);
-					const float wx = p[0] + lcE.worldT[0];
-					const float wy = p[1] + lcE.worldT[1];
-					float wt = 0.0f;
-					if (lcE.geom)
-						wt = *reinterpret_cast<const float*>(
-							reinterpret_cast<std::uintptr_t>(lcE.geom) + 0x07C + 0x24 + 8);
-					const float wz = p[2] + wt;
-					// v315：v276 诊断的 GetLandHeight 在渲染线程（铁律禁止）→ 禁用
-					// （诊断功能，非必要；避免 v314 同款崩溃）
-					// float lh = 0.0f;
-					// if (tes->GetLandHeight(RE::NiPoint3{ wx, wy, 0.0f }, lh)) {
-					// 	SKSE::log::info("v276: E-edge(2,0) wx={:.0f} wy={:.0f} meshZ={:.1f} landH={:.1f} dH={:.2f}",
-					// 		wx, wy, wz, lh, wz - lh);
-					// }
+					// v565：wx/wy/wz/p 诊断变量已删（C4189——v315 已禁用此诊断）
 				}
 			}
 			// v239：边界高度诊断——玩家 cell（ci=24）东边界（q1/q3 的 c=n-1 列）与东邻
@@ -5441,7 +4839,7 @@ namespace SnowDeform
 				}
 			}
 			if (needRecover) {
-				if (now2 - landLastRequest > 800 && !highResBuildQueued.load()) {
+				if (now2 - landLastRequest > 800) {  // v565b：highResBuildQueued 已删（BuildHighResMesh 死链，恒 false）
 					SKSE::log::info("v434: center 3x3 not 129² (valid={}/196 invalid={} null={}) — zero-replace skip",
 						validCount, invalidCount, nullCount);
 					// v284b：**needRecover 不再重建**（零替换架构——Smooth Terrain 129²
@@ -5478,13 +4876,23 @@ namespace SnowDeform
 	{
 		// v449b：读档/新游戏——引擎卸载全部地形/REFR/场景，所有缓存指向已释放
 		// 逐项清空（vector 用默认构造安全复位），下一轮 FindLandscape 重建。
-		// 双缓冲 landBuf[2][49][4]（[帧代][cell 0..48][quadrant]）整体默认构造复位。
+		// v569：**landReady 先置 false（停渲染线程）再清空**——原顺序 clear 场后
+		// 才 store(false)，渲染线程在窗口内仍写场 → 竞争。footprints/colliders
+		// 清空加锁（渲染线程 RebuildField/ScanColliders 并发）。
+		landReady.store(false);
+		landFootDirty.store(false);
 		for (auto& gen : landBuf)
 			for (auto& row : gen)
 				for (auto& q : row)
 					q = LandCellGeom{};
-		footprints.clear();
-		colliders.clear();
+		{
+			std::lock_guard<std::mutex> lkF9(footMtx);
+			footprints.clear();
+		}
+		{
+			std::lock_guard<std::mutex> lkC9(colliderMtx);
+			colliders.clear();
+		}
 		lastObjPos.clear();
 		mineCounts.clear();
 		deformField.clear();
@@ -5493,27 +4901,9 @@ namespace SnowDeform
 		ridgeFieldObj.clear();
 		sceneLiftBuf = {};
 		terrainH.clear();
-		landReady.store(false);
-		landFootDirty.store(false);
 		root = nullptr;
-		attachNode = nullptr;
 		dynMesh = nullptr;
 		rendererData = nullptr;
-		lastAttackState = RE::ATTACK_STATE_ENUM::kNone;
 		SKSE::log::info("v449b: reset all cache for load game");
-	}
-
-	void SnowShellMesh::Shutdown()
-	{
-		if (attachNode && root) {
-			attachNode->DetachChild2(root);
-		}
-		// v430：雪壳 stream 成员已删（纯地形版无 NIF 加载链）；root 由引擎引用计数
-		// 管理，Detach 后场景树不再引用 → 对象存活到进程退出（调试期泄漏可接受）
-		root = nullptr;
-		dynMesh = nullptr;
-		rendererData = nullptr;
-		attachNode = nullptr;
-		initialized = false;
 	}
 }
