@@ -1436,6 +1436,13 @@ namespace SnowDeform
 	// 默认 400 = 保留 ~10s 轨迹 + 成本封顶 rf≤~5.5ms；玩家可调大（长轨迹）
 	// 或调小（极致帧数）。范围 100-2000。
 	static std::size_t gPlayerFpMax = 400;
+	// v575 检测（用户"加检测代码看数据，别猜"，2026-08-27）：雪堆闪定位——
+	// fadeMark=驱逐标记数（2s）、fadeWrote=淡出中写场脚印数、fadeAvg=平均 fade。
+	// 判读：fadeMark 高 = 滚动快（尾部雪堆在换）；fadeAvg 高 = 淡出没生效；
+	// fadeWrote≈0 且闪 = 闪不是淡出问题（查 geom 重建/场原点）。
+	static std::atomic<long long> gFadeMarkN{ 0 };
+	static std::atomic<long long> gFadeCurN{ 0 };
+	static std::atomic<long long> gFadeSum1000{ 0 };
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
 
@@ -1586,6 +1593,8 @@ namespace SnowDeform
 					if (fp.dieAt) {
 						const float fade = std::clamp(1.0f - static_cast<float>(GetTickCount() - fp.dieAt) / 2000.0f, 0.0f, 1.0f);
 						decay *= fade;
+						gFadeCurN.fetch_add(1, std::memory_order_relaxed);                            // v575
+						gFadeSum1000.fetch_add(static_cast<long long>(fade * 1000.0f), std::memory_order_relaxed);  // v575
 					}
 					if (fp.tMs != 0) {
 						// v554：**玩家脚印也按时间回填（用户"玩家脚印也是啊"实锤）**——
@@ -2935,14 +2944,14 @@ namespace SnowDeform
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
 								itE != footprints.end())
-								itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+								{ itE->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 						} else {
 							if (auto itP = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 								itP != footprints.end())
-								itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+								{ itP->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 							else
-								footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
+								{ footprints.begin()->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 兜底标记最老淡出）
 						}
 					}
 					}
@@ -3209,14 +3218,14 @@ namespace SnowDeform
 								if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 									[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
 									itE != footprints.end())
-									itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+									{ itE->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 							} else {
 								if (auto itP = std::find_if(footprints.begin(), footprints.end(),
 									[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 									itP != footprints.end())
-									itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+									{ itP->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 								else
-									footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
+									{ footprints.begin()->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 兜底标记最老淡出）
 							}
 						}
 						lastR = sr;
@@ -3319,14 +3328,14 @@ namespace SnowDeform
 							if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });  // v574：跳过淡出中
 								itE != footprints.end())
-								itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+								{ itE->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 						} else {
 							if (auto itP = std::find_if(footprints.begin(), footprints.end(),
 								[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 								itP != footprints.end())
-								itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+								{ itP->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 							else
-								footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
+								{ footprints.begin()->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 兜底标记最老淡出）
 						}
 					}
 					landFootDirty.store(true);
@@ -3617,14 +3626,14 @@ namespace SnowDeform
 					if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 						[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
 						itE != footprints.end())
-						itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+						{ itE->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 				} else {
 					if (auto itP = std::find_if(footprints.begin(), footprints.end(),
 						[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });  // v574：跳过淡出中
 						itP != footprints.end())
-						itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+						{ itP->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 					else
-						footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
+						{ footprints.begin()->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 兜底标记最老淡出）
 				}
 			}
 		}
@@ -4040,14 +4049,14 @@ namespace SnowDeform
 									if (auto itE = std::find_if(footprints.begin(), footprints.end(),
 										[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
 										itE != footprints.end())
-										itE->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+										{ itE->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 								} else {
 									if (auto itP = std::find_if(footprints.begin(), footprints.end(),
 										[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
 										itP != footprints.end())
-										itP->dieAt = GetTickCount();  // v574：淡出标记（不立即删——2s 渐隐防雪堆闪）
+										{ itP->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 淡出标记）
 									else
-										footprints.begin()->dieAt = GetTickCount();  // v574：兜底标记最老淡出（不再硬删）
+										{ footprints.begin()->dieAt = GetTickCount(); gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }  // v575：驱逐标记计数（v574 兜底标记最老淡出）
 								}
 							}
 					landFootDirty.store(true);  // 新脚印 → 本帧全量重算上传
@@ -4549,6 +4558,17 @@ namespace SnowDeform
 					vtA, static_cast<double>(sLdVtMaxUs) / 1000.0,
 					upA, static_cast<double>(sLdUpMaxUs) / 1000.0,
 					sLdGeoms, sLdDeform, sLdUpKB, sLdFp);
+				// v575：雪堆闪定位检测（2s 窗口）
+				{
+					const long long fadeWrote = gFadeCurN.load(std::memory_order_relaxed);
+					const double fadeAvg = fadeWrote > 0 ?
+						static_cast<double>(gFadeSum1000.load(std::memory_order_relaxed)) / fadeWrote / 1000.0 : 0.0;
+					SKSE::log::info("v575-dbg: fadeMark={}/2s fadeWrote={} fadeAvg={:.2f} fp={}",
+						gFadeMarkN.load(std::memory_order_relaxed), fadeWrote, fadeAvg, sLdFp);
+					gFadeMarkN.store(0, std::memory_order_relaxed);
+					gFadeCurN.store(0, std::memory_order_relaxed);
+					gFadeSum1000.store(0, std::memory_order_relaxed);
+				}
 				sLdRfUs = sLdVtUs = sLdUpUs = 0;
 				sLdRfMaxUs = sLdVtMaxUs = sLdUpMaxUs = 0;
 				sLdFrames = sLdGeoms = sLdDeform = sLdUpKB = 0;
