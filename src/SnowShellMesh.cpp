@@ -3040,12 +3040,42 @@ namespace SnowDeform
 				return RE::BSContainer::ForEachResult::kContinue;
 			}
 			// v590：活体→尸体转变（被打死倒下瞬间）→ 盖压痕
+			// v602：**被抓取的尸体按活体处理（拖动沿途盖章，像头盔滚动）**——
+			// 头盔（物品）被抓着移动 → ScanMovingObjects 沿途盖章（滚动拖痕）；
+			// 尸体此前"尸体持续"直接 return → 拖动过程零痕迹（只有释放那一下）
+			// = "头盔有效果尸体没有"的根因。被抓取（pc->GetGrabbedRef()==a）的
+			// 尸体移动 >25 → 沿途盖 shape=14 战壕拖痕（rL/rS=8 宽 40 沟，同活体
+			// 动物）；释放点由 v598 盖最终压痕。
 			if (isDead) {
 				if (!lp.wasDead) {
 					lp.wasDead = true;
 					lp.x = ap.x;
 					lp.y = ap.y;
 					stampCorpse(a, ap);
+					return RE::BSContainer::ForEachResult::kContinue;
+				}
+				if (pc->GetGrabbedRef().get() == a) {
+					const float dx = ap.x - lp.x, dy = ap.y - lp.y;
+					if (dx * dx + dy * dy > 25.0f * 25.0f) {
+						const float px = lp.x, py = lp.y;
+						lp.x = ap.x;
+						lp.y = ap.y;
+						{
+							auto& shell = SnowDeform::GetSnowShellMesh();
+							std::lock_guard<std::mutex> lk(shell.footMtx);
+							shell.footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, 0.0f, 0.0f,
+								8.0f, 8.0f, px, py, 14, GetTickCount() });
+							shell.landFootDirty.store(true);
+						}
+						sDbgStamped++;
+						if (sDbgStampLog < 10) {
+							sDbgStampLog++;
+							const float dPx = ap.x - pp.x, dPy = ap.y - pp.y;
+							SKSE::log::info("v602-dbg: drag corpse={} at=({:.0f},{:.0f}) distP={:.0f}",
+								a->GetDisplayFullName(), ap.x, ap.y,
+								std::sqrt(dPx * dPx + dPy * dPy));
+						}
+					}
 				}
 				return RE::BSContainer::ForEachResult::kContinue;
 			}
