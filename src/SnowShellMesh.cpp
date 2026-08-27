@@ -1456,6 +1456,7 @@ namespace SnowDeform
 	// 失效 → 顶点循环跳过 → 雪堆消失 → 重缓存（800ms 节流）才恢复 = "走路时
 	// 雪堆凹下去又突出来"的候选根因（盖章密度/延迟/驱逐已全部数据排除）。
 	static std::atomic<long long>     gGeomInvalidN{ 0 };
+	static std::atomic<long long>     gConeN{ 0 };  // v579：ConeCS 削坡执行计数（应 ≈ 盖章帧数）
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
 
@@ -4221,11 +4222,13 @@ namespace SnowDeform
 		if (landRebuildPending.exchange(false))  // v567：exchange 一次性取走（消费后清，防永久强制全量）
 			firstFullUp = true;
 		const auto tVt0 = clkLd::now();  // v545：geom 顶点循环计时起点
-		// v567：**ConeCS 降频计数移到循环外**——v564 放循环内导致每 geom 都 ++
-		// （4 quad × N cell 快速消耗计数 → 频率语义错误）。现在每帧 1 次：每
-		// 4 个 dirty 帧全量 ConeCS 一次（所有 geom 一起，延迟 1-3 帧无感）。
-		static int sCone564 = 0;
-		const bool coneDue = (sCone564++ & 3) == 0;
+		// v579（用户"走起来尖角三角、停下平滑、交替闪"，2026-08-27）：**ConeCS 去降频、
+		// 每帧削坡**——原 v567 每 4 个 dirty 帧 ConeCS 1 次：顶点循环每 dirty 帧全量
+		// 重算，coneDue 帧顶点被削坡（平滑）、非 coneDue 帧顶点=场原始值（坑/雪堆
+		// 边缘陡 → 三角尖角）→ 走路盖章（每帧重建）时 3/4 帧尖角、1/4 帧平滑 = 交替
+		// 闪；停下无重建 = 保持最后上传 → 平滑。每帧削坡后顶点恒平滑（不再交替）。
+		// 成本：ConeCS 只在 dirty 帧跑（盖章 7/s → 每 ~9 帧 1 次），平均 ~1.6ms 可接受。
+		const bool coneDue = true;
 		for (int ci = 0; ci < 49; ci++) {
 			for (int q = 0; q < 4; q++) {
 				auto& lc = cells[ci][q];
@@ -4385,10 +4388,10 @@ namespace SnowDeform
 				// 1.7）。正确：**凸起（h>orig）用坡度受限值，凹陷（h≤orig）保留合成
 				// 下陷**（max(orig) 的防穿透语义只对凸起雪堆有意义）。
 				// v547：回退 v534m——ConeCS 全量（无增量跳过）
-				// v564：**ConeCS 降频 1/4**——全量每 dirty 帧跑（129² 顶点 × 多尺度
-				// 8 邻域 ≈ 1-2ms）。坡度修正是低频视觉操作（削陡壁棱角），延迟
-				// 1-3 帧（33-100ms）无感。static 计数 & 3 每 4 个 dirty 帧跑 1 次。
+				// v579：ConeCS 每帧削坡（原 v564 降频 1/4 导致 3/4 帧未削 = 尖角/平滑交替闪，
+				// 用户实锤"走尖角停平滑"）——每 dirty 帧所有高密 geom 全量削坡。
 				if (coneDue && !nearFp.empty() && vc == highResDim * highResDim) {
+					gConeN.fetch_add(1, std::memory_order_relaxed);  // v579：削坡执行计数
 					const auto n = static_cast<int>(highResDim);
 					const float spacing = 2048.0f / static_cast<float>(n - 1);
 					// v450：**坡面陡度按材质**——雪 1.0（45° 陡壁）；沙 0.5（~27°
@@ -4619,6 +4622,9 @@ namespace SnowDeform
 					// v578：geom 失效数（>0 = 引擎重建发生 → 雪堆消失/恢复周期）
 					SKSE::log::info("v578-dbg: geomInvalid={}/2s", gGeomInvalidN.load(std::memory_order_relaxed));
 					gGeomInvalidN.store(0, std::memory_order_relaxed);
+					// v579：ConeCS 削坡次数（每帧削坡后 ≈ 处理 geom 数×盖章帧）
+					SKSE::log::info("v579-dbg: cone={}/2s", gConeN.load(std::memory_order_relaxed));
+					gConeN.store(0, std::memory_order_relaxed);
 				}
 				sLdRfUs = sLdVtUs = sLdUpUs = 0;
 				sLdRfMaxUs = sLdVtMaxUs = sLdUpMaxUs = 0;
