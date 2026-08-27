@@ -1511,6 +1511,33 @@ namespace SnowDeform
 				if (f.shape == 14 && f.dieAt == 0 && f.tMs != 0 && nowDie - f.tMs > 30000)
 					f.dieAt = nowDie;
 			}
+			// v596：**统一驱逐（玩家跑动卡顿根因修复）**——v553 的驱逐只在盖章处
+			// 触发且 `objCnt>80 永远删 obj` → 只要生物多（obj 顶到 80 以上），玩家
+			// 脚印（shape<=3）**无任何上限**无限堆积（fp 801→1184 实锤；玩家跑才
+			// 盖章 → 玩家脚印堆积 → 全链路变慢 = "玩家跑才卡"）。改：玩家脚印
+			// 独立上限 200、obj 独立上限 80，各自触发驱逐（最老优先，淡出 2s）。
+			// 盖章处旧驱逐保留（双保险，只删 obj，不再影响玩家脚印）。
+			int plyAlive = 0, objAlive = 0;
+			for (const auto& f : footprints) {
+				if (f.dieAt == 0) {
+					if (f.shape <= 3)
+						plyAlive++;
+					else
+						objAlive++;
+				}
+			}
+			if (plyAlive > 200) {
+				if (auto itP = std::find_if(footprints.begin(), footprints.end(),
+					[](const Footprint& f) { return f.shape <= 3 && f.dieAt == 0; });
+					itP != footprints.end())
+					{ itP->dieAt = nowDie; gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }
+			}
+			if (objAlive > 80) {
+				if (auto itO = std::find_if(footprints.begin(), footprints.end(),
+					[](const Footprint& f) { return f.shape > 3 && f.dieAt == 0; });
+					itO != footprints.end())
+					{ itO->dieAt = nowDie; gFadeMarkN.fetch_add(1, std::memory_order_relaxed); }
+			}
 			footprints.erase(std::remove_if(footprints.begin(), footprints.end(),
 								[&](const Footprint& f) { return f.dieAt != 0 && nowDie - f.dieAt > 2000; }),
 				footprints.end());
