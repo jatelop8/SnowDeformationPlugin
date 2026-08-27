@@ -1441,17 +1441,13 @@ namespace SnowDeform
 	// fadeMark=驱逐标记数（2s）、fadeWrote=淡出中写场脚印数、fadeAvg=平均 fade。
 	// 判读：fadeMark 高 = 滚动快（尾部雪堆在换）；fadeAvg 高 = 淡出没生效；
 	// fadeWrote≈0 且闪 = 闪不是淡出问题（查 geom 重建/场原点）。
-	static std::atomic<long long> gFadeMarkN{ 0 };
-	static std::atomic<long long> gFadeCurN{ 0 };
-	static std::atomic<long long> gFadeSum1000{ 0 };
+	static std::atomic<long long> gFadeMarkN{ 0 };  // v574：驱逐淡出标记计数（v596 统一驱逐用）
 	// v576（用户"直接改"，2026-08-27）：盖章→重建延迟检测——gDirtySetT 在盖章置
 	// dirty 时记录，dirtyDue 帧重建时算差值。预期 v576 后 delayAvg ≈ 1 帧（16ms），
 	// 之前 150ms 限频时 ≈150ms（= 雪堆"突然冒出"的闪的延迟来源）。
 	static std::atomic<unsigned long> gDirtySetT{ 0 };
 	static std::atomic<long long>     gDelaySum{ 0 }, gDelayN{ 0 };
 	static std::atomic<unsigned long> gDelayMax{ 0 };
-	// v577：盖章间距统计（验证门 48 生效——预期 avg≈48+，之前 ~5）
-	static std::atomic<long long>     gStampGapSum{ 0 }, gStampN{ 0 };
 	// v604：**盖章同步精准检测（用户"保证移动和雪堆同步精准，不会延迟偏差"）**——
 	// 按类型统计盖章数（0=玩家 1=NPC 2=马 3=狼/其他动物）+ 盖章→场重建延迟
 	//（RebuildField 遍历脚印最新 tMs，now - maxTms = 最后盖章到本次重建的延迟，
@@ -1459,12 +1455,6 @@ namespace SnowDeform
 	static std::atomic<long long>     gStmpType[4]{ 0, 0, 0, 0 };
 	static std::atomic<long long>     gDelay2Sum{ 0 }, gDelay2N{ 0 };
 	static std::atomic<unsigned long> gDelay2Max{ 0 };
-	// v578（用户"没有用接着改"，2026-08-27）：**geom 失效计数**——SafeGeomValid
-	// 失败 = 引擎 LOD 重建了 LANDSCAPE geom（vertexCount 变化/对象替换）→ 缓存
-	// 失效 → 顶点循环跳过 → 雪堆消失 → 重缓存（800ms 节流）才恢复 = "走路时
-	// 雪堆凹下去又突出来"的候选根因（盖章密度/延迟/驱逐已全部数据排除）。
-	static std::atomic<long long>     gGeomInvalidN{ 0 };
-	static std::atomic<long long>     gConeN{ 0 };  // v579：ConeCS 削坡执行计数（应 ≈ 盖章帧数）
 	static std::atomic<long long> gRebObjFoot{ 0 };
 	static std::atomic<long long> gRebObjWrite{ 0 };
 
@@ -1748,8 +1738,6 @@ namespace SnowDeform
 					if (fp.dieAt) {
 						const float fade = std::clamp(1.0f - static_cast<float>(GetTickCount() - fp.dieAt) / 1600.0f, 0.0f, 1.0f);  // v606：1200→1600（脚印持久）
 						decay *= fade;
-						gFadeCurN.fetch_add(1, std::memory_order_relaxed);                            // v575
-						gFadeSum1000.fetch_add(static_cast<long long>(fade * 1000.0f), std::memory_order_relaxed);  // v575
 					}
 					if (fp.tMs != 0) {
 						// v554：**玩家脚印也按时间回填（用户"玩家脚印也是啊"实锤）**——
@@ -3168,9 +3156,6 @@ namespace SnowDeform
 				}
 			}
 			sDbgActors++;
-			// v589-dbg：每 actor 扫描记录（含移动状态）——数据驱动确认覆盖
-			SKSE::log::info("v589-dbg: actor={} moved={}", a->GetDisplayFullName(),
-				(dx * dx + dy * dy > 25.0f * 25.0f) ? 1 : 0);
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
 		lastAT = nowA;  // v569/v587：调用后更新（一次遍历盖全部 actor）
@@ -3350,10 +3335,6 @@ namespace SnowDeform
 					}
 					landFootDirty.store(true);
 					gDirtySetT.store(GetTickCount(), std::memory_order_relaxed);  // v576：盖章→重建延迟检测
-					gStampGapSum.fetch_add(static_cast<long long>(dist), std::memory_order_relaxed);  // v577：间距统计
-					gStampN.fetch_add(1, std::memory_order_relaxed);
-					SKSE::log::info("v437b: stamp r={:.1f} at=({:.0f},{:.0f}) depth={:.2f} axis={:.1f}x{:.1f}",
-						st.radius, st.x, st.y, depth, fpRL, fpRS);
 					st.px = st.x;
 					st.py = st.y;
 				}
@@ -3400,8 +3381,6 @@ namespace SnowDeform
 	static std::atomic<float>  gObjLastY{ 0.0f };
 	static std::atomic<float>  gObjFirstX{ 0.0f }; // v480e：物品首个盖章（单点圆，宽度铁证）
 	static std::atomic<float>  gObjFirstY{ 0.0f };
-	static std::atomic<float>  gDragLastX{ 0.0f }; // v521：最近武器盖章（拖痕/击打）位置——场值实测
-	static std::atomic<float>  gDragLastY{ 0.0f };
 	static std::atomic<float>  gDragSpeed{ 0.0f };   // v530：最近武器盖章速度（单位/s）——速度门调参
 	static std::atomic<float>  gPcSpeed{ 0.0f };     // v532：玩家移动速度（速度门调参）
 	static std::atomic<int>    gDragSpeedGate{ 0 };  // v530：深坑被速度门挡次数（走路/站定下垂 = 不敲击）
@@ -3810,66 +3789,6 @@ namespace SnowDeform
 		auto* tes = RE::TES::GetSingleton();
 		if (!player || !tes)
 			return;
-		// v507-dbg：**武器碰撞链路诊断（v506 仍零触发）**——每秒打印：
-		// node（Weapon R 找到否）、shapes（遍历碰撞体数）、boundOk（GetColliderBound
-		// 成功数）、第一个碰撞体的 cpos z / crad / lh / gap（离地间隙 = z-crad-lh）。
-		// 定位：节点没找到？碰撞体被半径门滤掉？还是武器根本没贴地（gap 太大）？
-		{
-			static unsigned long lastWpnDbg = 0;
-			const unsigned long nowWpn = GetTickCount();
-			if (nowWpn - lastWpnDbg >= 1000) {
-				lastWpnDbg = nowWpn;
-				const char* nodeName = "NONE";
-				int shapes = 0;
-				int boundOk = 0;
-				float fz = 0.0f, frad = 0.0f, flh = 0.0f, fgap = 0.0f;
-				int ftype = -1;
-				float fhx = 0.0f, fhy = 0.0f, fhz = 0.0f;
-				if (auto* root3d = player->Get3D(false)) {
-					if (SnowDeform::RTTIIsA(root3d, "NiNode")) {
-						auto* wnode = static_cast<RE::NiNode*>(root3d)->GetObjectByName("Weapon R");
-						if (!wnode)
-							wnode = static_cast<RE::NiNode*>(root3d)->GetObjectByName("Weapon");
-						if (wnode) {
-							nodeName = "Weapon(fb)";
-							RE::BSVisit::TraverseScenegraphCollision(wnode,
-								[&](RE::bhkNiCollisionObject* colObj) -> RE::BSVisit::BSVisitControl {
-									shapes++;
-									RE::NiPoint3 cpos;
-									float crad = 0.0f;
-									if (GetColliderBoundList(colObj, cpos, crad)) {  // v527：List 版（与盖章一致）
-										boundOk++;
-										// v514：**武器碰撞形状 dump**——type（hkpShapeType int）
-										// + 三轴半投影（GetMaximumProjection）
-										if (boundOk == 1) {
-											fz = cpos.z;
-											frad = crad;
-											float lh = -30000.0f;
-											tes->GetLandHeight(RE::NiPoint3{ cpos.x, cpos.y, 0.0f }, lh);
-											flh = lh;
-											fgap = cpos.z - crad - lh;
-											if (auto* sp = GetColliderShapePtr(colObj)) {
-												ftype = static_cast<int>(sp->type);
-												auto proj = [sp](float x, float y, float z) {
-													return sp->GetMaximumProjection(RE::hkVector4{ x, y, z, 0.0f }) * RE::bhkWorld::GetWorldScaleInverse();
-												};
-												fhx = 0.5f * (proj(1, 0, 0) + proj(-1, 0, 0));
-												fhy = 0.5f * (proj(0, 1, 0) + proj(0, -1, 0));
-												fhz = 0.5f * (proj(0, 0, 1) + proj(0, 0, -1));
-											}
-										}
-									}
-									return RE::BSVisit::BSVisitControl::kContinue;
-								});
-						}
-					}
-				}
-				SKSE::log::info("v507-dbg: node={} shapes={} boundOk={} cposZ={:.0f} crad={:.1f} lh={:.0f} gap={:.1f} type={} half=({:.1f},{:.1f},{:.1f}) dragSpd={:.0f} pcSpd={:.0f} gate={}",
-					nodeName, shapes, boundOk, fz, frad, flh, fgap, ftype, fhx, fhy, fhz,
-					gDragSpeed.load(std::memory_order_relaxed), gPcSpeed.load(std::memory_order_relaxed),
-					gDragSpeedGate.load(std::memory_order_relaxed));
-			}
-		}
 		// 武器 3D 碰撞体贴地检测
 		bool hit = false;
 		RE::NiPoint3 hitPos{};
@@ -3957,11 +3876,6 @@ namespace SnowDeform
 		const int nW = (itW == mineCounts.end()) ? 1 : itW->second + 1;
 		mineCounts[keyW] = nW;
 		const float depth = static_cast<float>(nW);  // shape=10 objD=depth → -18n 叠加
-		const float rL = hitHalfL > 2.0f ? hitHalfL : 8.0f;
-		const float rS = hitHalfW > 2.0f ? hitHalfW : 8.0f;
-		float lhW = -30000.0f;
-		tes->GetLandHeight(RE::NiPoint3{ hitPos.x, hitPos.y, 0.0f }, lhW);
-		const float gapW = hitPos.z - hitR - lhW;
 		// v531：**拖拽全面取消（用户拍板），只保留武器攻击碰撞（敲击深坑 shape=10）**——
 		// 走路/拖地（武器慢速触地）不再盖章。敲击 = 玩家静止（站定挥击）+ 武器快速
 		// 移动（挥动砸地）；走路/跑步（玩家移动下垂）、站定下垂（武器静止）→ 一律
@@ -4048,22 +3962,9 @@ namespace SnowDeform
 				}
 			}
 		}
-		gDragLastX.store(hitPos.x, std::memory_order_relaxed);  // v521：场值实测用
-		gDragLastY.store(hitPos.y, std::memory_order_relaxed);
 		gDragSpeed.store(wpnSpeed, std::memory_order_relaxed);  // v530：速度门调参
 		gPcSpeed.store(pcSpeed, std::memory_order_relaxed);     // v532：速度门调参
 		landFootDirty.store(true);
-		// v510-dbg：**盖章位置 vs 玩家位置（用户"没什么效果"——链路全通但坑看不见，
-		// 嫌疑=坑出在玩家看不到的位置/武器碰撞体质心偏移）**
-		{
-			const auto ppos = player->GetPosition();
-			const float pdx = hitPos.x - ppos.x;
-			const float pdy = hitPos.y - ppos.y;
-			SKSE::log::info("v510-dbg: strike at=({:.0f},{:.0f}) player=({:.0f},{:.0f}) dx={:.0f} dy={:.0f} dist={:.0f}",
-				hitPos.x, hitPos.y, ppos.x, ppos.y, pdx, pdy, std::sqrt(pdx * pdx + pdy * pdy));
-		}
-		SKSE::log::info("v513: weapon strike #{} at=({:.0f},{:.0f}) rL={:.0f} rS={:.0f} gap={:.0f} shape={} strike (-{:.0f})",
-			nW, hitPos.x, hitPos.y, rL, rS, gapW, wshape, static_cast<float>(nW) * 18.0f);
 		// 格计数缓存上限（远离玩家的格清除，v516 恢复）
 		if (mineCounts.size() > 500) {
 			const auto ppos = player->GetPosition();
@@ -4393,15 +4294,6 @@ namespace SnowDeform
 					// 落地 = 接近地面 + z 静止（支撑期）+ 水平钉地（排除摆动最低点）
 					const float pmove = (playerPos.x - lastFootPos.x) * (playerPos.x - lastFootPos.x) +
 						(playerPos.y - lastFootPos.y) * (playerPos.y - lastFootPos.y);
-					// v289-dbg：诊断落地检测卡点——用户实测"完全没有效果" = 盖章从未
-					// 触发（0 个 v288 日志、v133 totalDeformed=0）。每 500ms/脚打原始
-					// 数据，看 gap/dz/dxy/pmove 哪个条件不满足。
-					static unsigned long lastFootDiag[2] = { 0, 0 };
-					if (nowMs - lastFootDiag[s] >= 500) {
-						lastFootDiag[s] = nowMs;
-						SKSE::log::info("v289-dbg: foot={} gap={:.1f} dz={:.2f} dxy={:.2f} pmove={:.0f} fz={:.0f} landH={:.0f}",
-							isL ? "L" : "R", gap, dz, dxy, std::sqrt(pmove), fz, landH);
-					}
 					// v292：gap<45 → gap<130——数据实锤静止时厚雪区 gap=66~84（GetLandHeight
 					// 返回 LANDSCAPE 基岩高度，不含雪壳；雪壳厚 60+），gap<45 在厚雪区
 					// 永不触发（用户实测只有雪薄处盖章）。落地主要靠 dz/dxy（z 静止 +
@@ -4472,8 +4364,6 @@ namespace SnowDeform
 								}
 							}
 					landFootDirty.store(true);  // 新脚印 → 本帧全量重算上传
-					SKSE::log::info("v288: foot={} land at=({:.0f},{:.0f}) size=({:.0f}x{:.0f}) shape={} depth={:.2f} gap={:.0f} dz={:.1f} dxy={:.1f}",
-								isL ? "L" : "R", fx, fy, bootLen, bootWid, shapeId, stampDepth, gap, dz, dxy);
 						}
 					}
 				}
@@ -4796,7 +4686,6 @@ namespace SnowDeform
 				// v579：ConeCS 每帧削坡（原 v564 降频 1/4 导致 3/4 帧未削 = 尖角/平滑交替闪，
 				// 用户实锤"走尖角停平滑"）——每 dirty 帧所有高密 geom 全量削坡。
 				if (coneDue && !nearFp.empty() && vc == highResDim * highResDim) {
-					gConeN.fetch_add(1, std::memory_order_relaxed);  // v579：削坡执行计数
 					const auto n = static_cast<int>(highResDim);
 					const float spacing = 2048.0f / static_cast<float>(n - 1);
 					// v450：**坡面陡度按材质**——雪 1.0（45° 陡壁）；沙 0.5（~27°
@@ -4981,7 +4870,6 @@ namespace SnowDeform
 				// SafeUpload 保护 UpdateSubresource（崩溃日志实锤 nvwgf2umx rep movsb）
 				std::uint32_t curVc = 0;
 				if (!lc.geom || !SafeGeomValid(lc.geom, vc, curVc)) {
-					gGeomInvalidN.fetch_add(1, std::memory_order_relaxed);  // v578：引擎重建计数
 					lc.geom = nullptr;  // 引擎重建 → 本缓存失效（下轮重缓存补）
 					continue;
 				}
@@ -5028,22 +4916,12 @@ namespace SnowDeform
 					vtA, static_cast<double>(sLdVtMaxUs) / 1000.0,
 					upA, static_cast<double>(sLdUpMaxUs) / 1000.0,
 					sLdGeoms, sLdDeform, sLdUpKB, sLdFp);
-				// v575：雪堆闪定位检测（2s 窗口）
-				{
-					const long long fadeWrote = gFadeCurN.load(std::memory_order_relaxed);
-					const double fadeAvg = fadeWrote > 0 ?
-						static_cast<double>(gFadeSum1000.load(std::memory_order_relaxed)) / fadeWrote / 1000.0 : 0.0;
-					SKSE::log::info("v575-dbg: fadeMark={}/2s fadeWrote={} fadeAvg={:.2f} fp={}",
-						gFadeMarkN.load(std::memory_order_relaxed), fadeWrote, fadeAvg, sLdFp);
-					gFadeMarkN.store(0, std::memory_order_relaxed);
-					gFadeCurN.store(0, std::memory_order_relaxed);
-					gFadeSum1000.store(0, std::memory_order_relaxed);
-					// v576：盖章→重建延迟（预期 avg≈16ms；>100ms 说明限频残留）
-					SKSE::log::info("v576-dbg: rebuild={}/2s delayAvg={:.0f}ms delayMax={}ms",
-						gDelayN.load(std::memory_order_relaxed),
-						gDelayN.load(std::memory_order_relaxed) > 0 ?
-							static_cast<double>(gDelaySum.load(std::memory_order_relaxed)) / gDelayN.load(std::memory_order_relaxed) : 0.0,
-						gDelayMax.load(std::memory_order_relaxed));
+				// v576：盖章→重建延迟（预期 avg≈16ms；>100ms 说明限频残留）
+				SKSE::log::info("v576-dbg: rebuild={}/2s delayAvg={:.0f}ms delayMax={}ms",
+					gDelayN.load(std::memory_order_relaxed),
+					gDelayN.load(std::memory_order_relaxed) > 0 ?
+						static_cast<double>(gDelaySum.load(std::memory_order_relaxed)) / gDelayN.load(std::memory_order_relaxed) : 0.0,
+					gDelayMax.load(std::memory_order_relaxed));
 					gDelaySum.store(0, std::memory_order_relaxed);
 					gDelayN.store(0, std::memory_order_relaxed);
 					gDelayMax.store(0, std::memory_order_relaxed);
@@ -5063,20 +4941,6 @@ namespace SnowDeform
 					gDelay2Sum.store(0, std::memory_order_relaxed);
 					gDelay2N.store(0, std::memory_order_relaxed);
 					gDelay2Max.store(0, std::memory_order_relaxed);
-					// v577：盖章间距（预期 avg≈48+ = 门生效，坑不重叠不跳）
-					SKSE::log::info("v577-dbg: stamps={}/2s gapAvg={:.0f}",
-						gStampN.load(std::memory_order_relaxed),
-						gStampN.load(std::memory_order_relaxed) > 0 ?
-							static_cast<double>(gStampGapSum.load(std::memory_order_relaxed)) / gStampN.load(std::memory_order_relaxed) : 0.0);
-					gStampGapSum.store(0, std::memory_order_relaxed);
-					gStampN.store(0, std::memory_order_relaxed);
-					// v578：geom 失效数（>0 = 引擎重建发生 → 雪堆消失/恢复周期）
-					SKSE::log::info("v578-dbg: geomInvalid={}/2s", gGeomInvalidN.load(std::memory_order_relaxed));
-					gGeomInvalidN.store(0, std::memory_order_relaxed);
-					// v579：ConeCS 削坡次数（每帧削坡后 ≈ 处理 geom 数×盖章帧）
-					SKSE::log::info("v579-dbg: cone={}/2s", gConeN.load(std::memory_order_relaxed));
-					gConeN.store(0, std::memory_order_relaxed);
-				}
 				sLdRfUs = sLdVtUs = sLdUpUs = 0;
 				sLdRfMaxUs = sLdVtMaxUs = sLdUpMaxUs = 0;
 				sLdFrames = sLdGeoms = sLdDeform = sLdUpKB = 0;
@@ -5162,62 +5026,6 @@ namespace SnowDeform
 						}
 					SKSE::log::info("v480c-dbg: lastStamp at=({:.0f},{:.0f}) pDist={:.0f} peak={:.2f} minHalf={:.1f} +x:[{}] (expect ~21)",
 						ox, oy, pDist, peak, minHalf, prof);
-				}
-			}
-			// v521-dbg：**武器盖章（拖痕/击打）位置场值 + 顶点实测（用户"拖拽武器雪
-			// 沟壑依旧没看到"——盖章触发 48 次但视觉没有，v510b SINK 只有 2.9）**——
-			// 直接测最近武器盖章位置的场值（期望 ≈ objD=1.11 拖痕/-1.0 击打）：
-			//   场值 ≈1.1 → 场写入对 → 问题在顶点应用/上传（查 UpdateLandscape）
-			//   场值 ≈0   → 场没写入 → RebuildField 没跑/拖痕没进场（查 dirty 链）
-			{
-				const float wx2 = gDragLastX.load(std::memory_order_relaxed);
-				const float wy2 = gDragLastY.load(std::memory_order_relaxed);
-				if (wx2 != 0.0f) {
-					const auto fvAt = [&](float x2, float y2) -> float {
-						const int gx2 = static_cast<int>(std::floor((x2 - fieldOriginX) / kFieldStep + 0.5f));
-						const int gy2 = static_cast<int>(std::floor((y2 - fieldOriginY) / kFieldStep + 0.5f));
-						if (gx2 < 0 || gx2 >= kFieldDim || gy2 < 0 || gy2 >= kFieldDim)
-							return 0.0f;
-						return deformFieldObj[static_cast<std::size_t>(gy2) * kFieldDim + gx2];  // v530：拖痕/深坑在 obj 场（v529 遗漏：fvAt 原读玩家场 → 日志误导）
-					};
-					const float fv = fvAt(wx2, wy2);
-					// v524b：**SampleField 对比（顶点应用同款双线性）**——fvAt 是最近邻
-					//（+0.5 四舍五入），顶点应用用 SampleField（双线性 floor）。若
-					// SampleField≈0 而 fvAt≈1.1 → fieldOrigin/场索引 bug 实锤（顶点
-					// 应用采样到场的空区 → 玩家 cell 永不显示拖痕/脚印）。
-					float sfDeform = 0.0f, sfRidge = 0.0f;
-					SampleFieldObjNearest(wx2, wy2, sfDeform, sfRidge);  // v529：拖痕在 obj 场；v564 最近邻
-					// 最近 quad 顶点实测（玩家 cell 4 quad 找最近顶点）
-					float bestV = 1.0e9f;
-					float sinkV = -9999.0f;
-					for (int qd2 = 0; qd2 < 4; qd2++) {
-						auto& cgV = cells[24][qd2];
-						if (!cgV.raw || cgV.verts == 0)
-							continue;
-						// v569：强守卫——原 `work.size()<40` 弱守卫：size≥40 但 <stride*verts
-						// 时 vi2*wStrideV 越界读（最多 ~240KB）。全量校验 work/orig。
-						const auto wStrideV = cgV.stride ? cgV.stride : 40u;
-						const auto needV = static_cast<std::size_t>(wStrideV) * cgV.verts;
-						if (cgV.work.size() < needV || cgV.orig.size() < needV)
-							continue;
-						for (std::uint32_t vi2 = 0; vi2 < cgV.verts && vi2 < 6000; vi2++) {
-							const auto* posV = reinterpret_cast<const float*>(
-								cgV.work.data() + static_cast<std::size_t>(vi2) * wStrideV);
-							const float dvx = (posV[0] + cgV.worldT[0]) - wx2;
-							const float dvy = (posV[1] + cgV.worldT[1]) - wy2;
-							const float d2 = dvx * dvx + dvy * dvy;
-							if (d2 < bestV) {
-								bestV = d2;
-								const float ozV = *reinterpret_cast<const float*>(
-									cgV.orig.data() + static_cast<std::size_t>(vi2) * wStrideV + 8);
-								const float wzV = *reinterpret_cast<const float*>(
-									cgV.work.data() + static_cast<std::size_t>(vi2) * wStrideV + 8);
-								sinkV = ozV - wzV;
-							}
-						}
-					}
-					SKSE::log::info("v521-dbg: drag at=({:.0f},{:.0f}) fvAt={:.3f} SampleField={:.3f}/{:.3f} origin=({:.0f},{:.0f}) nearestVertSink={:.1f} (expect fv~1.1 sf~1.1 sink~20)",
-						wx2, wy2, fv, sfDeform, sfRidge, fieldOriginX, fieldOriginY, sinkV);
 				}
 			}
 			SKSE::log::info("v404-def: stamps={} rate={:.1f}/s deformVerts={} deepest={:.1f} fieldMax={:.3f} ridgeMax={:.1f} sceneLiftMax={:.1f}",
@@ -5450,8 +5258,6 @@ namespace SnowDeform
 			SKSE::log::info("v140: player-cell quads=[{}] (Q=65x65 m=33x33 l=17x17 -=miss)", line);
 		}
 	}
-
-
 
 	void SnowShellMesh::ResetForLoadGame()
 	{
