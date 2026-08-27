@@ -1508,7 +1508,9 @@ namespace SnowDeform
 			std::lock_guard<std::mutex> lkF03(footMtx);
 			const unsigned long nowDie = GetTickCount();
 			for (auto& f : footprints) {
-				if (f.shape == 14 && f.dieAt == 0 && f.tMs != 0 && nowDie - f.tMs > 30000)
+				// v601：30s→60s（尸体压痕/动物脚印痕迹更持久，用户要看效果；
+				// obj 80 上限 + 驱逐兜底防堆积）
+				if (f.shape == 14 && f.dieAt == 0 && f.tMs != 0 && nowDie - f.tMs > 60000)
 					f.dieAt = nowDie;
 			}
 			// v596：**统一驱逐（玩家跑动卡顿根因修复）**——v553 的驱逐只在盖章处
@@ -2062,7 +2064,7 @@ namespace SnowDeform
 						if (dist2 > rC2 && dist2 < 2.8f * rC2) {
 							const float st2 = (dist2 - rC2) / (1.8f * rC2);
 							const float sinT2 = std::sin(st2 * 3.14159265f);
-							const float mound = sinT2 * sinT2 * 20.0f * fp.depth * decay;  // 雪丘（埋尸鼓包）
+							const float mound = sinT2 * sinT2 * 24.0f * fp.depth * decay;  // v601：雪丘 20→24（配合 depth 0.6 → ~14 隆起，埋尸感）
 							if (mound > r) r = mound;
 						}
 					}
@@ -2914,7 +2916,10 @@ namespace SnowDeform
 		const float cY = std::cos(yaw), sY = std::sin(yaw);
 		{
 			std::lock_guard<std::mutex> lk(footMtx);
-			footprints.push_back({ ap.x, ap.y, 0.35f, 0.0f, cY, sY,
+			// v601：**尸体压痕对齐物品（头盔）落地强度（用户"尸体不能像头盔一样么"）**——
+			// depth 0.35→0.6（物品 kObjDepth 同款）→ 坑 -0.6×1.85×18≈-20，和物品/
+			// 玩家坑同深度，明显可见；雪丘环（v599 24×depth≈14）埋尸感更强。
+			footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, cY, sY,
 				50.0f, 25.0f, ap.x, ap.y, 14, GetTickCount() });
 			landFootDirty.store(true);
 			// v600-dbg：盖章后列表状态（定位"盖了但看不到"——是否被驱逐/重叠/丢失）
@@ -2955,7 +2960,8 @@ namespace SnowDeform
 				const float cY = std::cos(yaw), sY = std::sin(yaw);
 				{
 					std::lock_guard<std::mutex> lk(footMtx);
-					footprints.push_back({ cap.x, cap.y, 0.35f, 0.0f, cY, sY,
+					// v601：depth 0.35→0.6（对齐物品落地强度，坑 -20 明显可见）
+					footprints.push_back({ cap.x, cap.y, 0.6f, 0.0f, cY, sY,
 						50.0f, 25.0f, cap.x, cap.y, 14, GetTickCount() });
 					landFootDirty.store(true);
 				}
