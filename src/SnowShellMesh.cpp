@@ -1833,24 +1833,12 @@ namespace SnowDeform
 							const float br = sinT * sinT * 12.0f * objD * decay;
 							if (br > r) r = br;
 						}
-						// v560：**动物蹄印（shape=14）**——小椭圆坑（rL=6/rS=4 由盖章传）
-						// + 小雪堆环（3rC，m=6×objD）——马蹄/爪印，300s 回填。
-					} else if (fp.shape == 14) {
-						const float rC = std::max(fp.rS, 4.0f);
-						const float objD = fp.depth * 1.85f;  // 0.3×1.85=0.555 → -10 浅坑
-						const float dist = std::sqrt((wx - fp.x) * (wx - fp.x) + (wy - fp.y) * (wy - fp.y));
-						if (dist < rC) {
-							const float s = (dist / rC - 0.35f) / 0.65f;
-							const float cl = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
-							const float bd = (1.0f - cl * cl * (3.0f - 2.0f * cl)) * objD * decay;
-							if (bd > d) d = bd;
-						}
-						if (dist > rC && dist < 3.0f * rC) {
-							const float st = (dist - rC) / (2.0f * rC);
-							const float sinT = std::sin(st * 3.14159265f);
-							const float br = sinT * sinT * 6.0f * objD * decay;
-							if (br > r) r = br;
-						}
+						// v589：**NPC/动物脚印 = 玩家同款雪沟壑（用户"要和玩家的雪沟壑
+						// 一样"）**——删除 v560 独立小坑分支（rL=6/rS=4 深-10），shape=14
+						// 落入下方玩家战壕分支（胶囊线段 rA/rC 椭圆横截面 + 坑沿雪堆环）
+						// → 与玩家脚印分毫不差（宽 40 深-18 + 雪堆 9.6）。场通道不变
+						//（shape>3 → obj 场，玩家优先合成互不覆盖）。v588-dbg 统计保留
+						//（场写入处 if fp.shape==14）。
 					} else if (segLenSq > 1.0e-4f) {
 						const float proj = (wx - fp.prevX) * segDx + (wy - fp.prevY) * segDy;
 						const float t = std::clamp(proj / segLenSq, 0.0f, 1.0f);
@@ -2826,146 +2814,75 @@ namespace SnowDeform
 		return shape;
 	}
 
-	// v346：**Havok 碰撞体扫描（CS Stamping 同款）**——游戏线程 50ms 节流。
-	// 玩家 3D 树全部碰撞体 → colliders 缓存 {中心, 半径}。贴近地面过滤（底部
-	// v560：**动物脚印（马匹/动物）**——ProcessLists::ForEachHighActor 遍历玩家附近
-	// 活动 Actor（游戏线程调度），找 Hoof（马/牛）/Paw（犬科/猫科）/Foot 脚节点，
-	// 脚节点世界位置盖章（shape=14 蹄印：小椭圆坑+小雪堆，300s 回填）。动物静止时
-	// 脚不动 → 距离节流（>20 单位）天然防重复；人形（FaceGenHead race）排除。
-	static void FindAllNodesByName(RE::NiAVObject* a_root, const char* a_sub,
-		std::vector<RE::NiAVObject*>& a_out)
-	{
-		if (!a_root || !a_sub)
-			return;
-		if (a_root->name.size() > 0 &&
-			std::strstr(a_root->name.c_str(), a_sub) != nullptr)
-			a_out.push_back(a_root);
-		if (auto* nd = As<RE::NiNode>(a_root, "NiNode")) {
-			for (auto& child : nd->GetChildren()) {
-				if (child)
-					FindAllNodesByName(child.get(), a_sub, a_out);
-			}
-		}
-	}
-
-	// v587：**收集 3D 树全部节点**（最低节点兜底用——骨骼命名未知时取 z 最低节点
-	// 当脚/蹄，任何骨骼通用）
-	static void CollectAllNodes(RE::NiAVObject* a_root, std::vector<RE::NiAVObject*>& a_out)
-	{
-		if (!a_root)
-			return;
-		a_out.push_back(a_root);
-		if (auto* nd = As<RE::NiNode>(a_root, "NiNode")) {
-			for (auto& child : nd->GetChildren()) {
-				if (child)
-					CollectAllNodes(child.get(), a_out);
-			}
-		}
-	}
-
 	void SnowShellMesh::ScanAnimalFeet()
 	{
 		auto* pl = RE::ProcessLists::GetSingleton();
 		auto* pc = RE::PlayerCharacter::GetSingleton();
-		if (!pl || !pc || !pc->Get3D())
+		if (!pl || !pc)
 			return;
 		const auto pp = pc->GetPosition();
-		// 全局盖章节流：上次盖章点（多动物场景少见，简单处理）
-		static float lastAX = 0.0f, lastAY = 0.0f;
 		static unsigned long lastAT = 0;
-		// v587：**节流移到调用级（"马匹没效果"根因之一）**——原 v569 把 lastAT 更新放
-		// lambda 内：第一个 actor 处理后 lastAT=nowA → 后续 actor 的 nowA-lastAT<300
-		// 全被跳过 → 每 300ms 只处理 1 个 actor（多动物/NPC 时只有遍历序第一个能盖）。
-		// 移到 ForEachHighActor 外：一次遍历处理全部 actor（4 脚都盖由内部 20 单位
-		// 节流控制）。
+		// v587：节流在调用级（一次遍历盖全部 actor）
 		const unsigned long nowA = GetTickCount();
 		if (nowA - lastAT < 300)
 			return;
+		// v589：**每 actor 独立上次位置**（formID -> 位置 + 首见标记）——连续战壕
+		// 需要 prev=上次位置（玩家盖章同款）；v587 的全局 lastAX/lastAY 多 actor
+		// 互相干扰（prev 错位 → 战壕乱连）。
+		struct LastP {
+			float x = 0.0f, y = 0.0f;
+			bool init = false;
+		};
+		static std::unordered_map<std::uint32_t, LastP> lastPos;
 		// v587-dbg：汇总统计（2s 输出一次）
 		static int sDbgStamped = 0, sDbgActors = 0;
 		static unsigned long lastDbgT = 0;
+		static int sDbgStampLog = 0;
 		pl->ForEachHighActor([&](RE::Actor* a) -> RE::BSContainer::ForEachResult {
 			if (!a || a == pc || a->IsDead())
 				return RE::BSContainer::ForEachResult::kContinue;
-			// v587：**删人形排除（用户要求 NPC/敌人也盖章）**——v560 的
-			// kFaceGenHead 过滤把所有 NPC/敌人挡掉 = "NPC 没效果"直接原因。
-			// 现在只排除玩家自己与尸体，人形/动物/骑乘全部盖章。
+			// v587：人形/动物/骑乘全盖（只排除玩家自己与尸体）
 			const auto ap = a->GetPosition();
-			// v587：300 → 1000（用户选更大范围）
+			// v587：范围 1000（用户选更大）
 			if ((ap - pp).Length() > 1000.0f)
 				return RE::BSContainer::ForEachResult::kContinue;
-			auto* root = a->Get3D(false);
-			if (!root)
+			auto& lp = lastPos[a->formID];
+			// v589：**actor 中心位置盖章（不再细分脚节点/最低节点兜底）**——用户
+			// "马也要和玩家骑马时候的雪沟壑一样"：actor 位置连续轨迹 → 玩家同款
+			// 战壕（马 4 蹄合成 1 条沟壑，与玩家骑马一致）。首见只记录不盖；
+			// 移动 >20 单位盖（prev=上次位置 → 连续胶囊战壕，玩家盖章同款逻辑）。
+			if (!lp.init) {
+				lp.x = ap.x;
+				lp.y = ap.y;
+				lp.init = true;
 				return RE::BSContainer::ForEachResult::kContinue;
-			// 脚节点收集：Hoof（马/牛）→ Paw（犬/猫）→ Foot（其他）→ 大小写变体
-			std::vector<RE::NiAVObject*> feet;
-			FindAllNodesByName(root, "Hoof", feet);
-			if (feet.empty())
-				FindAllNodesByName(root, "Paw", feet);
-			if (feet.empty())
-				FindAllNodesByName(root, "Foot", feet);
-			if (feet.empty())
-				FindAllNodesByName(root, "hoof", feet);
-			if (feet.empty())
-				FindAllNodesByName(root, "paw", feet);
-			if (feet.empty())
-				FindAllNodesByName(root, "foot", feet);
-			// v587：**最低节点兜底（"马匹没效果"根因之二）**——骨骼节点名若全不
-			// 匹配（马/狼等命名未知）→ 收集全部节点按世界 z 升序取最低 4 个
-			//（站立生物最低节点 = 蹄/爪/脚，通用）；过滤 actor 位置下方 150 内
-			//（排除举起的武器/低垂尾巴等）。
-			if (feet.empty()) {
-				std::vector<RE::NiAVObject*> all;
-				CollectAllNodes(root, all);
-				if (all.size() > 1) {
-					std::sort(all.begin(), all.end(), [&](const RE::NiAVObject* A, const RE::NiAVObject* B) {
-						return A->world.translate.z < B->world.translate.z;
-					});
-					const float footZLim = ap.z + 150.0f;
-					for (auto* n : all) {
-						if (feet.size() >= 4)
-							break;
-						if (n->world.translate.z <= footZLim)
-							feet.push_back(n);
-					}
-				}
 			}
-			if (feet.size() < 2)
-				return RE::BSContainer::ForEachResult::kContinue;  // 无脚/单脚节点跳过
-			// 盖章：每脚（最多 4），脚世界位置，距上次盖章点 > 20 才盖
-			int stamped = 0;
-			for (auto* fn : feet) {
-				if (stamped >= 4)
-					break;
-				const auto fpw = fn->world.translate;  // 脚节点世界位置（NiAVObject::world）
-				const float dx = fpw.x - lastAX, dy = fpw.y - lastAY;
-				if (dx * dx + dy * dy > 20.0f * 20.0f) {
-					lastAX = fpw.x;
-					lastAY = fpw.y;
-					{
-						auto& shell = SnowDeform::GetSnowShellMesh();
-						std::lock_guard<std::mutex> lk(shell.footMtx);
-						shell.footprints.push_back({ fpw.x, fpw.y, 0.3f, 0.0f, 0.0f, 0.0f,
-							6.0f, 4.0f, fpw.x, fpw.y, 14, GetTickCount() });
-						shell.landFootDirty.store(true);
-					}
-					// v588-dbg：盖章位置（首 10 个）——确认盖在正确位置（脚 vs 玩家）
-					static int sDbgStampLog = 0;
-					if (sDbgStampLog < 10) {
-						sDbgStampLog++;
-						const float dPx = fpw.x - pp.x, dPy = fpw.y - pp.y;
-						SKSE::log::info("v588-dbg: stamp14 actor={} at=({:.0f},{:.0f},{:.0f}) distP={:.0f}",
-							a->GetDisplayFullName(), fpw.x, fpw.y, fpw.z,
-							std::sqrt(dPx * dPx + dPy * dPy));
-					}
-					stamped++;
-					sDbgStamped++;
+			const float dx = ap.x - lp.x, dy = ap.y - lp.y;
+			if (dx * dx + dy * dy > 20.0f * 20.0f) {
+				const float px = lp.x, py = lp.y;
+				lp.x = ap.x;
+				lp.y = ap.y;
+				{
+					auto& shell = SnowDeform::GetSnowShellMesh();
+					std::lock_guard<std::mutex> lk(shell.footMtx);
+					shell.footprints.push_back({ ap.x, ap.y, 0.8f, 0.0f, 0.0f, 0.0f,
+						8.0f, 8.0f, px, py, 14, GetTickCount() });
+					shell.landFootDirty.store(true);
+				}
+				sDbgStamped++;
+				// v589-dbg：盖章位置（首 10 个）——确认沟壑盖在 actor 轨迹上
+				if (sDbgStampLog < 10) {
+					sDbgStampLog++;
+					const float dPx = ap.x - pp.x, dPy = ap.y - pp.y;
+					SKSE::log::info("v589-dbg: stamp actor={} at=({:.0f},{:.0f}) distP={:.0f}",
+						a->GetDisplayFullName(), ap.x, ap.y,
+						std::sqrt(dPx * dPx + dPy * dPy));
 				}
 			}
 			sDbgActors++;
-			// v587-dbg：每 actor 打一行（含名字/脚数/盖章数）——数据驱动确认
-			// 哪些 actor 匹配、盖了多少（首见名字记录，防刷屏靠调用级 300ms 节流）
-			SKSE::log::info("v587-dbg: actor={} feet={} stamped={}", a->GetDisplayFullName(), feet.size(), stamped);
+			// v589-dbg：每 actor 扫描记录（含移动状态）——数据驱动确认覆盖
+			SKSE::log::info("v589-dbg: actor={} moved={}", a->GetDisplayFullName(),
+				(dx * dx + dy * dy > 400.0f) ? 1 : 0);
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
 		lastAT = nowA;  // v569/v587：调用后更新（一次遍历盖全部 actor）
@@ -2973,7 +2890,7 @@ namespace SnowDeform
 		const unsigned long nowDbg = GetTickCount();
 		if (nowDbg - lastDbgT >= 2000) {
 			lastDbgT = nowDbg;
-			SKSE::log::info("v587-dbg: actors2s={} stamped2s={} aFoot={} aWrite={}", sDbgActors, sDbgStamped,
+			SKSE::log::info("v589-dbg: actors2s={} stamped2s={} aFoot={} aWrite={}", sDbgActors, sDbgStamped,
 				gRebAnimalFoot.load(std::memory_order_relaxed),
 				gRebAnimalWrite.load(std::memory_order_relaxed));
 			sDbgActors = 0;
