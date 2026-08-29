@@ -2921,8 +2921,9 @@ namespace SnowDeform
 							std::lock_guard<std::mutex> lk(shell.footMtx);
 							// v623：depth 0.8→0.6（用户"马匹和物体滚动脚印数据同步"——
 							// 物体滚动 kObjDepth=0.6，马 0.8 深 33% 不一致 → 统一 0.6）
+							// v624：rL/rS 8→4（用户"马的宽度改成 4"——蹄迹战壕收窄）
 							shell.footprints.push_back({ hw.x, hw.y, 0.6f, 0.0f, 0.0f, 0.0f,
-								8.0f, 8.0f, hpx, hpy, 14, GetTickCount() });
+								4.0f, 4.0f, hpx, hpy, 14, GetTickCount() });
 							shell.landFootDirty.store(true);
 							gStmpType[2].fetch_add(1, std::memory_order_relaxed);
 						}
