@@ -2092,8 +2092,10 @@ namespace SnowDeform
 						const float rC2 = std::max(fp.rS, 8.0f);
 						if (dist2 > rC2 && dist2 < 2.8f * rC2) {
 							const float st2 = (dist2 - rC2) / (1.8f * rC2);
-							const float sinT2 = std::sin(st2 * 3.14159265f);
-							const float mound = sinT2 * sinT2 * 24.0f * fp.depth * decay;  // v601：雪丘 20→24（配合 depth 0.6 → ~14 隆起，埋尸感）
+							// v619：sinT² → smoothstep（v615 圆润经验用上尸体雪丘环）+ 系数
+							// 24→48（smoothstep 峰值 0.5 补偿 ×2，雪丘高度不变只改形状）
+							const float sst2 = st2 * st2 * (3.0f - 2.0f * st2);
+							const float mound = sst2 * 48.0f * fp.depth * decay;  // v601：雪丘 20→24（配合 depth 0.6 → ~14 隆起，埋尸感）
 							if (mound > r) r = mound;
 						}
 					}
@@ -2862,10 +2864,14 @@ namespace SnowDeform
 			// = 独立小洞。25 门控 + 150ms：慢走（80/s → 12 单位/150ms）也盖 → 段
 			// 首尾相接 → 连续沟壑（同玩家）。
 			const float dx = ap.x - lp.x, dy = ap.y - lp.y;
-			if (dx * dx + dy * dy > 25.0f * 25.0f) {
-				const float px = lp.x, py = lp.y;
-				lp.x = ap.x;
-				lp.y = ap.y;
+			// v619：**prev 每帧更新（未达标也更新）**——马/动物连续沟壑修复：旧逻辑
+			// 只在盖章时更新 lp → 门控未达标（马快走 50ms 移 20 < 25）不盖也不更新 →
+			// 下次盖段更长 → 断裂成"一个个点"（用户实锤）。prev 恒为最近位置 →
+			// 段始终 ≤ 门控 → 首尾相接连续沟壑。
+			const float px = lp.x, py = lp.y;
+			lp.x = ap.x;
+			lp.y = ap.y;
+			if (dx * dx + dy * dy > 12.0f * 12.0f) {  // v619：25→12（马 50ms 移 20 达标 → 段连续）
 				{
 					auto& shell = SnowDeform::GetSnowShellMesh();
 					std::lock_guard<std::mutex> lk(shell.footMtx);
