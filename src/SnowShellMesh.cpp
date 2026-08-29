@@ -4252,7 +4252,10 @@ namespace SnowDeform
 								// v544j：动态法线增强（差分×1.35 + 软饱和——视觉深坑）
 								// v562d/e：**增强 1.35→1.25→1.15（用户"法线圆润只加一点点"逐次微调）**——
 								// 坡度缓 15%，光照柔和，坑壁立体感保留
-								const float kNormScale = 1.15f;
+								// v610：1.15→1.3（用户 2026-08-30"走路沟壑很假"）——1.15 太缓
+								// 光照平、沟壑立体感不足；1.3 介于原 1.35 与现 1.15 之间（网格
+								// 181² 变细后法线差分更准，增强可适度回提）。用户可再微调。
+								const float kNormScale = 1.3f;
 								const float rawX = ((zW - zE) / sp2) * kNormScale;
 								const float rawY = ((zS - zN) / sp2) * kNormScale;
 								float nx = rawX / (1.0f + std::fabs(rawX));
