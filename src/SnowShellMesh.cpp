@@ -4231,6 +4231,10 @@ namespace SnowDeform
 						// n² 法线重算（vt 恢复 2.2-2.9ms，法线全量成本仍在）。v582 裁剪导致
 						// 问题（用户实测不满意，原因未明）。若后续再优化法线需换思路
 						//（如变形区增量重算，勿用框裁剪）。
+						// v611：法线平滑缓冲（差分法线先存 float，高斯平滑后压缩写回 @20）——
+						// 用户 2026-08-30"凹坑法线/阴影更柔和细腻"：差分法线逐顶点跳变 →
+						// 坑壁阴影生硬；3×3 [1,2,1]² 高斯平均后法线连续过渡 → 阴影柔和细腻。
+						std::vector<float> normBuf(static_cast<std::size_t>(n) * n * 3, 0.0f);
 						for (int r = 0; r < n; r++) {
 							for (int c = 0; c < n; c++) {
 								constexpr int kNormEdgeSkip = 2;  // v544l：3→2 与淡出匹配
@@ -4267,11 +4271,45 @@ namespace SnowDeform
 									ny /= len;
 									nz /= len;
 								}
-								// Skyrim 压缩法线：b = (n+1)*127 clamp 0..255（@20 3B）
-								auto* nb = reinterpret_cast<std::uint8_t*>(p) + 20;
-								nb[0] = static_cast<std::uint8_t>(std::clamp((nx + 1.0f) * 127.0f, 0.0f, 255.0f));
-								nb[1] = static_cast<std::uint8_t>(std::clamp((ny + 1.0f) * 127.0f, 0.0f, 255.0f));
-								nb[2] = static_cast<std::uint8_t>(std::clamp((nz + 1.0f) * 127.0f, 0.0f, 255.0f));
+								// v611：先存 float 法线到 normBuf（平滑 pass 用），不直接压缩写回
+								auto* nb = normBuf.data() + (static_cast<std::size_t>(r) * n + c) * 3;
+								nb[0] = nx;
+								nb[1] = ny;
+								nb[2] = nz;
+							}
+						}
+						// v611：法线高斯平滑 + 压缩写回（边缘 2 圈不参与平滑，保留差分结果）
+						for (int sr = 1; sr < n - 1; sr++) {
+							for (int sc = 1; sc < n - 1; sc++) {
+								float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+								for (int dr = -1; dr <= 1; dr++) {
+									for (int dc = -1; dc <= 1; dc++) {
+										const float w = (dr == 0 ? 2.0f : 1.0f) * (dc == 0 ? 2.0f : 1.0f);
+										const auto* sn = normBuf.data() +
+											(static_cast<std::size_t>(sr + dr) * n + (sc + dc)) * 3;
+										sx += sn[0] * w;
+										sy += sn[1] * w;
+										sz += sn[2] * w;
+									}
+								}
+								const float inv16 = 1.0f / 16.0f;
+								float nx = sx * inv16, ny = sy * inv16, nz = sz * inv16;
+								const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+								if (len > 1.0e-6f) {
+									nx /= len;
+									ny /= len;
+									nz /= len;
+								} else {
+									nx = 0.0f;
+									ny = 0.0f;
+									nz = 1.0f;
+								}
+								auto* sp = reinterpret_cast<float*>(
+									lc.work.data() + static_cast<std::size_t>(sr * n + sc) * stride);
+								auto* nbo = reinterpret_cast<std::uint8_t*>(sp) + 20;
+								nbo[0] = static_cast<std::uint8_t>(std::clamp((nx + 1.0f) * 127.0f, 0.0f, 255.0f));
+								nbo[1] = static_cast<std::uint8_t>(std::clamp((ny + 1.0f) * 127.0f, 0.0f, 255.0f));
+								nbo[2] = static_cast<std::uint8_t>(std::clamp((nz + 1.0f) * 127.0f, 0.0f, 255.0f));
 							}
 						}
 						}
