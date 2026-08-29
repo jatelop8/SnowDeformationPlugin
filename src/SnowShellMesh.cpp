@@ -2502,6 +2502,27 @@ namespace SnowDeform
 		return nullptr;
 	}
 
+	// v621：**收集所有含关键字子串的节点世界坐标**（马 4 蹄独立盖章用）——
+	// FindNodeByName 只返回第一个匹配；马骨架有 4 个 "Foot" 节点
+	//（Horse Front Foot [Lft]/[Rgt]、Horse Hind Foot [Lft]/[Rgt]），
+	// 需全部收集。结果按节点名字典序排序（同骨架遍历顺序稳定 → 同一腿
+	// 恒用同一 slot，轨迹不串腿）。GetWorldTranslate 游戏线程安全。
+	static void CollectNodesByName(RE::NiAVObject* a_root, const char* a_name,
+		std::vector<RE::NiAVObject*>& a_out)
+	{
+		if (!a_root || !a_name)
+			return;
+		if (a_root->name.size() > 0 &&
+			std::strstr(a_root->name.c_str(), a_name) != nullptr)
+			a_out.push_back(a_root);
+		if (auto* nd = As<RE::NiNode>(a_root, "NiNode")) {
+			for (auto& child : nd->GetChildren()) {
+				if (child)
+					CollectNodesByName(child.get(), a_name, a_out);
+			}
+		}
+	}
+
 	// 递归遍历子形状，取最大半径（武器 ListShape 展开用）
 	static float GetShapeRadiusRecursive(const RE::hkpShape* shape, float inv)
 	{
@@ -2650,6 +2671,9 @@ namespace SnowDeform
 		bool wasDead = false;  // v590：尸体状态（活体→尸体转变时盖压痕）
 	};
 	static std::unordered_map<std::uint32_t, LastP> lastPos;
+	// v621：马 4 蹄独立 lastPos（key = formID×16 + 蹄索引 0-3）——每蹄独立
+	// 连续战壕轨迹（凹陷对齐蹄子），不共享身体中心的 lastPos
+	static std::unordered_map<std::uint64_t, LastP> lastPosHoof;
 
 	// v592：**尸体压痕（TESDeathEvent 死亡事件版）**——死亡事件在死亡瞬间必触发
 	void SnowShellMesh::OnActorDeath(RE::Actor* a)
@@ -2854,6 +2878,58 @@ namespace SnowDeform
 				return RE::BSContainer::ForEachResult::kContinue;
 			}
 			lp.wasDead = false;
+			// v621：**马 4 蹄独立盖章（用户"凹陷和脚不在一起，在两边"实锤修复）**——
+			// 旧逻辑用 actor 中心（GetPosition）盖战壕 → 凹陷在身体中线下、马蹄在
+			// 两侧 → 视觉"凹陷和脚不在一起"。取 4 个蹄节点（名字含 "Foot"）世界
+			// 坐标，每条腿独立 lastPos + 独立连续战壕 → 凹陷精确对齐蹄子（真实
+			// 蹄迹线，对角步态交替，与玩家骑马观感一致）。找不到蹄节点（非标准
+			// 马骨架）→ 兜底回中心战壕。非马动物保持中心战壕（v589 现状）。
+			const bool isHorse = [&]() {
+				if (auto* r = a->GetRace()) {
+					const char* eid = r->GetFormEditorID();
+					return eid && std::strstr(eid, "Horse");
+				}
+				return false;
+			}();
+			if (isHorse) {
+				std::vector<RE::NiAVObject*> hoofNodes;
+				if (auto* n3d = a->Get3D())
+					CollectNodesByName(n3d, "Foot", hoofNodes);
+				if (hoofNodes.size() >= 2) {
+					std::sort(hoofNodes.begin(), hoofNodes.end(),
+						[](const RE::NiAVObject* x, const RE::NiAVObject* y) {
+							return std::strcmp(x->name.c_str(), y->name.c_str()) < 0;
+						});
+					if (hoofNodes.size() > 4)
+						hoofNodes.resize(4);
+					const auto keyBase = static_cast<std::uint64_t>(a->formID) * 16;
+					for (int hi = 0; hi < static_cast<int>(hoofNodes.size()); hi++) {
+						const auto hw = hoofNodes[hi]->world.translate;
+						auto& hlp = lastPosHoof[keyBase + static_cast<std::uint64_t>(hi)];
+						if (!hlp.init) {
+							hlp.x = hw.x;
+							hlp.y = hw.y;
+							hlp.init = true;
+							continue;
+						}
+						const float hdx = hw.x - hlp.x, hdy = hw.y - hlp.y;
+						const float hpx = hlp.x, hpy = hlp.y;
+						hlp.x = hw.x;
+						hlp.y = hw.y;
+						if (hdx * hdx + hdy * hdy > 12.0f * 12.0f) {
+							auto& shell = SnowDeform::GetSnowShellMesh();
+							std::lock_guard<std::mutex> lk(shell.footMtx);
+							shell.footprints.push_back({ hw.x, hw.y, 0.8f, 0.0f, 0.0f, 0.0f,
+								8.0f, 8.0f, hpx, hpy, 14, GetTickCount() });
+							shell.landFootDirty.store(true);
+							gStmpType[2].fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+					sDbgActors++;
+					return RE::BSContainer::ForEachResult::kContinue;
+				}
+				// 蹄节点不足 2 个 → 走下方中心战壕兜底（防止无痕）
+			}
 			// v589：**actor 中心位置盖章（不再细分脚节点）**——用户"马也要和玩家
 			// 骑马时候的雪沟壑一样"：actor 位置连续轨迹 → 玩家同款战壕（马 4 蹄
 			// 合成 1 条沟壑，与玩家骑马一致）。移动 >20 单位盖（prev=上次位置 →
@@ -4819,6 +4895,7 @@ namespace SnowDeform
 		lastObjPos.clear();
 		mineCounts.clear();
 		lastPos.clear();    // v609：读档清空（formID 复用防误盖）
+		lastPosHoof.clear();  // v621：马蹄 lastPos 同步清空
 		g_corpseQ.clear();  // v609：读档清空（防旧尸体 2s 后在新档位置盖坑）
 		deformField.clear();
 		ridgeField.clear();
