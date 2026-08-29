@@ -2891,74 +2891,68 @@ namespace SnowDeform
 				return RE::BSContainer::ForEachResult::kContinue;
 			}
 			lp.wasDead = false;
-			// v621：**马 4 蹄独立盖章（用户"凹陷和脚不在一起，在两边"实锤修复）**——
-			// 旧逻辑用 actor 中心（GetPosition）盖战壕 → 凹陷在身体中线下、马蹄在
-			// 两侧 → 视觉"凹陷和脚不在一起"。取 4 个蹄节点（名字含 "Foot"）世界
-			// 坐标，每条腿独立 lastPos + 独立连续战壕 → 凹陷精确对齐蹄子（真实
-			// 蹄迹线，对角步态交替，与玩家骑马观感一致）。找不到蹄节点（非标准
-			// 马骨架）→ 兜底回中心战壕。非马动物保持中心战壕（v589 现状）。
-			// v628：**V1（00afed2 Initial release）动物盖章（用户"做最早 V1 那个"）**——
-			// 回退 v589-627 的全部"中心战壕/4蹄/宽雪堆带"方案，恢复 V1 原版效果：
-			// 脚节点按优先级收集（Hoof 马/牛 → Paw 犬/猫 → Foot 其他动物）→ 每只
-			// 脚单点椭圆蹄印（rL=6/rS=4、depth 0.3 → 坑 -5.4、shape 14）、300ms 盖
-			// 章节流 + 20 单位门控、prev=当前（独立脚印不连战壕）。玩家骑马 = 马蹄
-			// 下一个个清晰的椭圆蹄印（精确对脚）。保留尸体压痕（v590+，不受影响）。
-			{
-				std::vector<RE::NiAVObject*> feet;
-				if (auto* n3d = a->Get3D()) {
-					CollectNodesByName(n3d, "Hoof", feet);
-					if (feet.empty())
-						CollectNodesByName(n3d, "Paw", feet);
-					if (feet.empty())
-						CollectNodesByName(n3d, "Foot", feet);
-				}
-				if (feet.size() >= 2) {
-					// V1 全局盖章节流（300ms，所有动物共享；与 50ms 遍历节流独立）
-					static unsigned long v1StampT = 0;
-					const unsigned long nowV1 = GetTickCount();
-					int stampedV1 = 0;
-					for (auto* fn : feet) {
-						if (stampedV1 >= 4)
-							break;
-						const auto fpw = fn->world.translate;
-						// V1 门控：距上次盖章点 > 20（位置记忆用每 actor lastPos，
-						// 比 V1 全局 lastAX/lastAY 更稳——多动物不互相抢占）
-						const float vdx = fpw.x - lp.x, vdy = fpw.y - lp.y;
-						if (nowV1 - v1StampT >= 300 && vdx * vdx + vdy * vdy > 20.0f * 20.0f) {
-							v1StampT = nowV1;
-							lp.x = fpw.x;
-							lp.y = fpw.y;
-							{
-								auto& shell = SnowDeform::GetSnowShellMesh();
-								std::lock_guard<std::mutex> lk(shell.footMtx);
-								shell.footprints.push_back({ fpw.x, fpw.y, 0.6f, 0.0f, 0.0f, 0.0f,
-									6.0f, 4.0f, fpw.x, fpw.y, 14, GetTickCount() });
-								shell.landFootDirty.store(true);
-							}
-							stampedV1++;
-						}
-					}
-					sDbgActors++;
-					return RE::BSContainer::ForEachResult::kContinue;
-				}
-				// 无脚节点（<2）→ 兜底：actor 中心单点脚印（防无痕）
-				const float ddx = ap.x - lp.x, ddy = ap.y - lp.y;
-				const float pxx = lp.x, pyy = lp.y;
-				lp.x = ap.x;
-				lp.y = ap.y;
-				if (ddx * ddx + ddy * ddy > 20.0f * 20.0f) {
-					auto& shell = SnowDeform::GetSnowShellMesh();
-					std::lock_guard<std::mutex> lk(shell.footMtx);
-					shell.footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, 0.0f, 0.0f,
-						6.0f, 4.0f, pxx, pyy, 14, GetTickCount() });
-					shell.landFootDirty.store(true);
-				}
-				sDbgActors++;
-				return RE::BSContainer::ForEachResult::kContinue;
-			}
-			// v628：v589-627 的中心战壕/4蹄/宽雪堆带逻辑已由上方 V1 盖章块取代（死代码删除）
+			// v630：**活体盖章移出（完全恢复 V1 原版算法）**——ForAllActors 只保留
+			// 尸体压痕处理（isDead 分支），活体盖章由下方独立的 V1 ForEachHighActor
+			// 循环执行（逐字对齐 00afed2：300 距离 + 全局 lastAX/lastAY/lastAT 300ms
+			// 节流 + 每脚 20 门控 + 单点椭圆蹄印 rL=6/rS=4/depth 0.3/shape 14）。
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
+		// v630：**V1（00afed2 Initial release）马/动物盖章原版算法（用户"最早的马
+		// 版本好看"实锤）**——v628/v629 用 ForAllActors+500 距离+每 actor lastPos
+		// 实现，观感与 V1 不同。此处逐字恢复 V1：ForEachHighActor（只高优先级
+		// 活动 actor）、300 单位距离、全局 lastAX/lastAY/lastAT（300ms 盖章节流
+		// 所有动物共享）、每脚 20 门控、单点椭圆蹄印（rL=6/rS=4、depth 0.3 →
+		// 坑 -5.4、shape 14、prev=当前不连战壕）。玩家骑马 = 马蹄下一个个清晰的
+		// 椭圆蹄印（精确对脚、间距 20、300ms 轮流）。
+		{
+			static float lastAX = 0.0f, lastAY = 0.0f;
+			static unsigned long lastATv1 = 0;
+			pl->ForEachHighActor([&](RE::Actor* a) -> RE::BSContainer::ForEachResult {
+				if (!a || a == pc || a->IsDead())
+					return RE::BSContainer::ForEachResult::kContinue;
+				// V1：人形排除（FaceGenHead = NPC/玩家同族）
+				if (a->GetRace() && a->GetRace()->data.flags.any(RE::RACE_DATA::Flag::kFaceGenHead))
+					return RE::BSContainer::ForEachResult::kContinue;
+				const auto ap = a->GetPosition();
+				if ((ap - pp).Length() > 300.0f)
+					return RE::BSContainer::ForEachResult::kContinue;
+				auto* root = a->Get3D(false);
+				if (!root)
+					return RE::BSContainer::ForEachResult::kContinue;
+				// 脚节点收集：Hoof（马/牛）→ Paw（犬/猫）→ Foot（其他动物）
+				std::vector<RE::NiAVObject*> feet;
+				CollectNodesByName(root, "Hoof", feet);
+				if (feet.empty())
+					CollectNodesByName(root, "Paw", feet);
+				if (feet.empty())
+					CollectNodesByName(root, "Foot", feet);
+				if (feet.size() < 2)
+					return RE::BSContainer::ForEachResult::kContinue;
+				// 盖章：每脚（最多 4），脚世界位置，距上次盖章点 > 20 才盖
+				const unsigned long nowA2 = GetTickCount();
+				int stamped = 0;
+				for (auto* fn : feet) {
+					if (stamped >= 4)
+						break;
+					const auto fpw = fn->world.translate;  // 脚节点世界位置
+					const float dx = fpw.x - lastAX, dy = fpw.y - lastAY;
+					if (nowA2 - lastATv1 >= 300 && dx * dx + dy * dy > 20.0f * 20.0f) {
+						lastAX = fpw.x;
+						lastAY = fpw.y;
+						lastATv1 = nowA2;
+						{
+							auto& shell = SnowDeform::GetSnowShellMesh();
+							std::lock_guard<std::mutex> lk(shell.footMtx);
+							shell.footprints.push_back({ fpw.x, fpw.y, 0.3f, 0.0f, 0.0f, 0.0f,
+								6.0f, 4.0f, fpw.x, fpw.y, 14, GetTickCount() });
+							shell.landFootDirty.store(true);
+						}
+						stamped++;
+					}
+				}
+				return RE::BSContainer::ForEachResult::kContinue;
+			});
+		}
 		lastAT = nowA;  // v569/v587：调用后更新（一次遍历盖全部 actor）
 		// v587-dbg：2s 汇总（防多 actor 刷屏）
 		const unsigned long nowDbg = GetTickCount();
