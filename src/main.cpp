@@ -170,9 +170,12 @@ namespace
 		// 未就绪/室内无地形 → 一次性标志 autoCreateDoneLocal=true 永久挡死 →
 		// 只能手动 F9）。改为：未成功前每 5 秒重试 FindLandscape，直到
 		// IsLandReady()（成功）或玩家手动 F9。读档后 autoCreateDone 重置继续。**
+		// v622：重试间隔 5000→1000（用户"进游戏要过一段时间才生效"实锤——
+		// 15s 首试 + 5s 重试 = 最坏 ~20s 才出效果）。1s 一次直到成功（FindLandscape
+		// 失败无害、内部有保护；v449b 读档"立即试一次"已稳定运行，无崩溃记录）。
 		if (autoCreateAt != 0 && now >= autoCreateAt && !autoCreateDone) {
 			static std::uint32_t lastAutoRetry = 0;
-			if (now - lastAutoRetry >= 5000) {
+			if (now - lastAutoRetry >= 1000) {
 				lastAutoRetry = now;
 				SKSE::log::info("SnowShellMesh: auto-create retry (landscape only)");
 				SKSE::GetTaskInterface()->AddTask([]() {
@@ -397,7 +400,10 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 			SnowDeform::GetSnowShellMesh().InstallProjectileHook();
 			// v80：自动创建延迟 3 秒 → 15 秒（v78/v79 在加载后 3 秒自动创建时崩——
 			// 场景流式加载高峰期引擎状态可能未就绪；手动 F9 从未在加载时崩过）
-			autoCreateAt = GetTickCount() + 15000;
+			// v622：**15000→5000（用户"进游戏要过一段时间才生效"实锤）**——v80
+			// 的崩溃是旧雪壳架构时代（v426 起纯地形 FindLandscape + 失败无害自动
+			// 重试兜底），5 秒首试 + 1 秒重试 = 进游戏 ~5-6 秒出效果，几乎立即。
+			autoCreateAt = GetTickCount() + 5000;
 		}
 		// v449b：**读档/新游戏复位（F9 快速读档闪退修复）**——引擎卸载全部地形，
 		// cells/geom 缓存悬空 → 下一帧 UpdateLandscape 写崩（vmovdqa [rcx] AV 实锤）。
@@ -412,7 +418,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 			if (msg->type == SKSE::MessagingInterface::kPostLoadGame ||
 				msg->type == SKSE::MessagingInterface::kNewGame) {
 				autoCreateDone = false;
-				autoCreateAt = GetTickCount() + 15000;
+				autoCreateAt = GetTickCount() + 5000;  // v622：15000→5000（进游戏立即生效）
 				// 立即试一次（读档地形可能已就绪）
 				SKSE::GetTaskInterface()->AddTask([]() {
 					SnowDeform::GetSnowShellMesh().FindLandscape();
