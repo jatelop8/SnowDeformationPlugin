@@ -17,4 +17,9 @@ This project is derived from the following open-source projects (all GPL-3.0):
 - [Skyrim Community Shaders](https://github.com/doodlum/skyrim-community-shaders) (Copyright (C) Community Shaders contributors) — core codebase; based on the "Snow Deformation feature" pull request by PppPlyr1 (Josef), including kSnowClasses and GetShapeBound helpers
 - [Smooth Terrain](https://www.nexusmods.com/skyrimspecialedition/mods/186875) by hakasapl (GPL-3.0) — RE offsets, call-site patching and terrain mesh methods
 
+Build dependencies (MIT, not derived from):
+
+- [CommonLibSSE-NG](https://github.com/alandtse/CommonLibSSE-NG) (MIT) — RE/REL framework
+- [spdlog](https://github.com/gabime/spdlog) (MIT) — logging
+
 If you use or modify this code, please keep these attributions and the GPL-3.0 license notice.
