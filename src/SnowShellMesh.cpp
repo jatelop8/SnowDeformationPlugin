@@ -1807,15 +1807,20 @@ namespace SnowDeform
 							if (dNorm2 >= 1.0f && dNorm2 < 2.6f * 2.6f) {
 								const float tt = std::sqrt(dNorm2);
 								const float st = (tt - 1.0f) / 1.6f;
-								const float sinT = std::sin(st * 3.14159265f);
-								bestR = sinT * sinT * 8.0f * objD * ridgeMul;
+								// v615：雪堆曲线 sinT² → smoothstep（用户"更圆润"）——
+								// sinT² 顶平坡面中段陡（不圆润）；smoothstep(0..1) 边缘
+								// 斜率→0（平滑融入地形）、顶部圆缓、对称圆弧 → 雪堆圆润。
+								// 峰值 0.5 vs sinT² 的 1.0 → 系数 8.0→16.0 补偿（同雪堆高度）。
+								const float sst = st * st * (3.0f - 2.0f * st);
+								bestR = sst * 16.0f * objD * ridgeMul;
 							}
 						} else {
 							const float dist = std::sqrt((wx - fp.x) * (wx - fp.x) + (wy - fp.y) * (wy - fp.y));
 							if (dist > rC && dist < 2.6f * rC) {
 								const float st = (dist - rC) / (1.6f * rC);
-								const float sinT = std::sin(st * 3.14159265f);
-								bestR = sinT * sinT * 8.0f * objD * ridgeMul;
+								// v615：同胶囊段——sinT² → smoothstep（圆润）+ 系数补偿
+								const float sst = st * st * (3.0f - 2.0f * st);
+								bestR = sst * 16.0f * objD * ridgeMul;
 							}
 						}
 						if (bestR > r) r = bestR;  // v532：只写雪堆，不写坑
