@@ -2919,7 +2919,9 @@ namespace SnowDeform
 						if (hdx * hdx + hdy * hdy > 12.0f * 12.0f) {
 							auto& shell = SnowDeform::GetSnowShellMesh();
 							std::lock_guard<std::mutex> lk(shell.footMtx);
-							shell.footprints.push_back({ hw.x, hw.y, 0.8f, 0.0f, 0.0f, 0.0f,
+							// v623：depth 0.8→0.6（用户"马匹和物体滚动脚印数据同步"——
+							// 物体滚动 kObjDepth=0.6，马 0.8 深 33% 不一致 → 统一 0.6）
+							shell.footprints.push_back({ hw.x, hw.y, 0.6f, 0.0f, 0.0f, 0.0f,
 								8.0f, 8.0f, hpx, hpy, 14, GetTickCount() });
 							shell.landFootDirty.store(true);
 							gStmpType[2].fetch_add(1, std::memory_order_relaxed);
@@ -2951,7 +2953,8 @@ namespace SnowDeform
 				{
 					auto& shell = SnowDeform::GetSnowShellMesh();
 					std::lock_guard<std::mutex> lk(shell.footMtx);
-					shell.footprints.push_back({ ap.x, ap.y, 0.8f, 0.0f, 0.0f, 0.0f,
+					// v623：depth 0.8→0.6（与物体滚动 kObjDepth 同步，见马 4 蹄注释）
+					shell.footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, 0.0f, 0.0f,
 						8.0f, 8.0f, px, py, 14, GetTickCount() });
 					shell.landFootDirty.store(true);
 					// v604：盖章类型计数（0 玩家 1 NPC 2 马 3 狼/其他动物）
@@ -3021,6 +3024,22 @@ namespace SnowDeform
 		{
 			RE::NiPointer<RE::Actor> mount;
 			if (pc->GetMount(mount) && mount) {
+				scanning.store(false);
+				return;
+			}
+		}
+		// v623：**跳跃/空中检测（用户"跳起来也会有雪堆"实锤）**——根因：旧贴地
+		// 检测 `center.z - radius <= groundZ + 40` 用玩家**相对高度**——跳起时玩家
+		// GetPosition().z 同步升高，鞋底碰撞体与 groundZ 差值不变 → 空中照常盖章
+		// （跳一下沿轨迹盖一串战壕）。ActorState 无 jumping 位（CommonLibSSE-NG
+		// 4.2.0 ActorState1 只有 flyState），改用 z 速度：**上升段（zVel>30，起跳→
+		// 最高点）跳过盖章**；下降段不挡（落地瞬间正常盖章 = 冲击痕迹，符合"计算
+		// 起跳落地"）。走路/下坡 z 不会持续向上 → 不误伤。落地瞬间 prev 与当前位置
+		// 差大 → v410 dist>256 自动重置 prev=当前（只盖独立脚印不连战壕），不横穿。
+		{
+			RE::NiPoint3 pv{};
+			pc->GetLinearVelocity(pv);
+			if (pv.z > 30.0f) {
 				scanning.store(false);
 				return;
 			}
