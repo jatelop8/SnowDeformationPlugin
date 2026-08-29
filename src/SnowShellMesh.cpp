@@ -1814,7 +1814,7 @@ namespace SnowDeform
 								// v616：环 2.6→3.0rC + 过渡 1.6→2.0（更宽更缓更圆润）；
 								// 系数 16→20（雪堆高 25%，用户"雪堆可以高一点"）。
 								const float sst = st * st * (3.0f - 2.0f * st);
-								bestR = sst * 20.0f * objD * ridgeMul;
+								bestR = sst * 26.0f * objD * ridgeMul;
 							}
 						} else {
 							const float dist = std::sqrt((wx - fp.x) * (wx - fp.x) + (wy - fp.y) * (wy - fp.y));
@@ -1822,7 +1822,7 @@ namespace SnowDeform
 								const float st = (dist - rC) / (2.0f * rC);
 								// v616：同胶囊段——smoothstep + 环加宽 + 系数 20
 								const float sst = st * st * (3.0f - 2.0f * st);
-								bestR = sst * 20.0f * objD * ridgeMul;
+								bestR = sst * 26.0f * objD * ridgeMul;
 							}
 						}
 						if (bestR > r) r = bestR;  // v532：只写雪堆，不写坑
@@ -2030,7 +2030,7 @@ namespace SnowDeform
 									// 2.6×r≈33（坑 12.6 + 隆起圈）——物品滚动不该有
 									// 挤出雪堆，只留细坑。shape==9 → m=0（不隆起）。
 									// v490：删物品特判——物品/玩家统一雪堆 12（物品滚过也是雪堆挤出）
-									const float m = 30.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
+									const float m = 34.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
 									if (m > r) r = m;
 								}
 							}
@@ -2181,7 +2181,7 @@ namespace SnowDeform
 			// v614：平滑 1 次 → 2 次（用户"更圆润"）——二次平滑坑/雪堆边缘更圆润、
 			// 块面感消减（第二次读第一次的平滑结果，有效双拉普拉斯）；成本 ×2
 			//（限幅框内，~6ms 封顶，v593 已限玩家 ±1024）。
-			for (int sp = 0; sp < 2; sp++) {
+			for (int sp = 0; sp < 3; sp++) {  // v617：2→3 次平滑（用户"极尽所能圆润"）
 			std::vector<float> dSmooth(static_cast<std::size_t>(bw) * bh, 0.0f);
 			std::vector<float> rSmooth(static_cast<std::size_t>(bw) * bh, 0.0f);
 			std::vector<float> dSmoothObj(static_cast<std::size_t>(bw) * bh, 0.0f);  // v529：物体场平滑
@@ -4308,24 +4308,28 @@ namespace SnowDeform
 								return *reinterpret_cast<const float*>(
 									lc.work.data() + (static_cast<std::size_t>(rr) * zn + cc) * stride + 8);
 							};
-							for (int sr = 1; sr < zn - 1; sr++) {
-								for (int sc = 1; sc < zn - 1; sc++) {
-									const float zv = zAt(sr, sc);
-									float zSum = zv;
-									int zc = 1;
-									if (sc > 0) { zSum += zAt(sr, sc - 1); zc++; }
-									if (sc < zn - 1) { zSum += zAt(sr, sc + 1); zc++; }
-									if (sr > 0) { zSum += zAt(sr - 1, sc); zc++; }
-									if (sr < zn - 1) { zSum += zAt(sr + 1, sc); zc++; }
-									zSmooth[static_cast<std::size_t>(sr) * zn + sc] =
-										0.5f * zv + 0.5f * (zSum / static_cast<float>(zc));
+							// v617：z 平滑 1→2 次（用户"尖峰雪堆极尽所能圆润"）——二次平滑
+							// 抹平尖峰（锥顶/锐棱），几何圆弧化；权重 0.4/0.6（邻域更重）
+							for (int zp = 0; zp < 2; zp++) {
+								for (int sr = 1; sr < zn - 1; sr++) {
+									for (int sc = 1; sc < zn - 1; sc++) {
+										const float zv = zAt(sr, sc);
+										float zSum = zv;
+										int zc = 1;
+										if (sc > 0) { zSum += zAt(sr, sc - 1); zc++; }
+										if (sc < zn - 1) { zSum += zAt(sr, sc + 1); zc++; }
+										if (sr > 0) { zSum += zAt(sr - 1, sc); zc++; }
+										if (sr < zn - 1) { zSum += zAt(sr + 1, sc); zc++; }
+										zSmooth[static_cast<std::size_t>(sr) * zn + sc] =
+											0.4f * zv + 0.6f * (zSum / static_cast<float>(zc));
+									}
 								}
+								for (int sr = 1; sr < zn - 1; sr++)
+									for (int sc = 1; sc < zn - 1; sc++)
+										*reinterpret_cast<float*>(
+											lc.work.data() + (static_cast<std::size_t>(sr) * zn + sc) * stride + 8) =
+											zSmooth[static_cast<std::size_t>(sr) * zn + sc];
 							}
-							for (int sr = 1; sr < zn - 1; sr++)
-								for (int sc = 1; sc < zn - 1; sc++)
-									*reinterpret_cast<float*>(
-										lc.work.data() + (static_cast<std::size_t>(sr) * zn + sc) * stride + 8) =
-										zSmooth[static_cast<std::size_t>(sr) * zn + sc];
 						}
 						// v613：法线双 pass 高斯平滑（用户"法线做到非常细腻"）——
 						// v611 单 pass 3×3 后相邻法线仍可能有细微跳变 + 3B 压缩量化带；
