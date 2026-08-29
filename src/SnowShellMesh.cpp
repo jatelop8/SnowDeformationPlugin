@@ -2019,8 +2019,12 @@ namespace SnowDeform
 								// 后坑沿净隆起 ≈ 14——走出来的雪路 = 中间沟壑 + 两侧雪堆。
 								// v437b：tt 用椭圆归一化距离（坑沿雪堆环沿椭圆）。
 								const float tt = std::sqrt(dNorm2);
-								if (tt > 1.0f && tt < 3.0f) {  // v616：雪堤 2.6→3.0r（更宽更圆润）
-									const float st = (tt - 1.0f) / 2.0f;
+								// v625：**马专属雪堆极宽环（shape=15，用户"雪堆非常宽"）**——
+								// 普通战壕 1~3r（v616 2.6→3.0r）；马 1~5r 超宽环 + 高度 1.5×
+								//（配合盖章 depth 1.16 深坑，宽雪堆挤出感强）。其他 shape 不变。
+								const float ringFar = (fp.shape == 15) ? 5.0f : 3.0f;
+								if (tt > 1.0f && tt < ringFar) {  // v616：雪堤 2.6→3.0r（更宽更圆润）
+									const float st = (tt - 1.0f) / (ringFar - 1.0f);
 									// v615/v616：sinT² → smoothstep（圆润，峰值 0.5）+ 环加宽；
 									// 系数 12→30（smoothstep 峰值减半补偿 24 + 高 25% = 30）
 									const float sst = st * st * (3.0f - 2.0f * st);
@@ -2030,7 +2034,9 @@ namespace SnowDeform
 									// 2.6×r≈33（坑 12.6 + 隆起圈）——物品滚动不该有
 									// 挤出雪堆，只留细坑。shape==9 → m=0（不隆起）。
 									// v490：删物品特判——物品/玩家统一雪堆 12（物品滚过也是雪堆挤出）
-									const float m = 17.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
+									float m = 17.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
+									if (fp.shape == 15)
+										m *= 1.5f;  // v625：马雪堆更高更明显
 									if (m > r) r = m;
 								}
 							}
@@ -2922,8 +2928,11 @@ namespace SnowDeform
 							// v623：depth 0.8→0.6（用户"马匹和物体滚动脚印数据同步"——
 							// 物体滚动 kObjDepth=0.6，马 0.8 深 33% 不一致 → 统一 0.6）
 							// v624：rL/rS 8→4（用户"马的宽度改成 4"——蹄迹战壕收窄）
-							shell.footprints.push_back({ hw.x, hw.y, 0.6f, 0.0f, 0.0f, 0.0f,
-								4.0f, 4.0f, hpx, hpy, 14, GetTickCount() });
+							// v625：**马专属 shape=15（用户"马脚印深坑加10、雪堆非常宽"）**——
+							// depth 0.6→1.16（坑 -10.8→-20.8，比物体/玩家深 10 单位）；
+							// shape 14→15 触发场写入的极宽雪堆环特判（5r，见顶点循环）。
+							shell.footprints.push_back({ hw.x, hw.y, 1.16f, 0.0f, 0.0f, 0.0f,
+								4.0f, 4.0f, hpx, hpy, 15, GetTickCount() });
 							shell.landFootDirty.store(true);
 							gStmpType[2].fetch_add(1, std::memory_order_relaxed);
 						}
