@@ -4079,15 +4079,19 @@ namespace SnowDeform
 				// 踩过边缘流平）；湿泥粘稠可塑（中坑+中堆+中坡）。
 				//   deformF 坑深比例 | ridgeF 雪堆比例 | slopeF 坡面陡度（ConeCS）
 				// 雪：1.0（-18）   | 1.0（+12） | 1.0（45°）
-				// 沙：0.4（-7）    | 0.25（+3） | 0.5（~27° 缓坡）
-				// 泥：0.65（-12）  | 0.65（+8） | 0.75（~37° 中坡）
+				// 沙：0.2（-3.6）  | 0（无雪堆）| 0.5（~27° 缓坡）
+				// 泥：0.35（-6.3） | 0（无雪堆）| 0.75（~37° 中坡）
+				// v620：**沙/泥只轻微凹陷、去掉雪堆（用户 2026-08-30"沙泥没有雪松软，
+				// 只有轻微凹陷不要雪堆效果"）**——雪能塑形（深坑+堆起），沙粒流动
+				// 踩过只留浅痕不堆起，湿泥粘稠也只有轻度痕迹。deformF 降至雪 1/5~1/3
+				//（沙 -3.6 / 泥 -6.3 轻微凹陷），ridgeF 归零（完全无隆起）。
 				float deformF = 1.0f, ridgeF = 1.0f;
 				if (lc.surfaceClass == 2) {       // 沙
-					deformF = 0.4f;
-					ridgeF = 0.25f;
+					deformF = 0.2f;
+					ridgeF = 0.0f;
 				} else if (lc.surfaceClass == 3) {  // 泥
-					deformF = 0.65f;
-					ridgeF = 0.65f;
+					deformF = 0.35f;
+					ridgeF = 0.0f;
 				}
 				const float delta = -deform * kSnowDepth * deformF + ridge * ridgeF + sceneLift;
 				// v544k：淡出区变形量乘 edgeFade（smoothstep 渐增 → 过渡自然）
