@@ -1804,23 +1804,25 @@ namespace SnowDeform
 							const float qAlong = qx * sdx + qy * sdy;
 							const float qAcross = qx * (-sdy) + qy * sdx;
 							const float dNorm2 = (qAlong / rA) * (qAlong / rA) + (qAcross / rC) * (qAcross / rC);
-							if (dNorm2 >= 1.0f && dNorm2 < 2.6f * 2.6f) {
+							if (dNorm2 >= 1.0f && dNorm2 < 3.0f * 3.0f) {
 								const float tt = std::sqrt(dNorm2);
-								const float st = (tt - 1.0f) / 1.6f;
+								const float st = (tt - 1.0f) / 2.0f;
 								// v615：雪堆曲线 sinT² → smoothstep（用户"更圆润"）——
 								// sinT² 顶平坡面中段陡（不圆润）；smoothstep(0..1) 边缘
 								// 斜率→0（平滑融入地形）、顶部圆缓、对称圆弧 → 雪堆圆润。
 								// 峰值 0.5 vs sinT² 的 1.0 → 系数 8.0→16.0 补偿（同雪堆高度）。
+								// v616：环 2.6→3.0rC + 过渡 1.6→2.0（更宽更缓更圆润）；
+								// 系数 16→20（雪堆高 25%，用户"雪堆可以高一点"）。
 								const float sst = st * st * (3.0f - 2.0f * st);
-								bestR = sst * 16.0f * objD * ridgeMul;
+								bestR = sst * 20.0f * objD * ridgeMul;
 							}
 						} else {
 							const float dist = std::sqrt((wx - fp.x) * (wx - fp.x) + (wy - fp.y) * (wy - fp.y));
-							if (dist > rC && dist < 2.6f * rC) {
-								const float st = (dist - rC) / (1.6f * rC);
-								// v615：同胶囊段——sinT² → smoothstep（圆润）+ 系数补偿
+							if (dist > rC && dist < 3.0f * rC) {
+								const float st = (dist - rC) / (2.0f * rC);
+								// v616：同胶囊段——smoothstep + 环加宽 + 系数 20
 								const float sst = st * st * (3.0f - 2.0f * st);
-								bestR = sst * 16.0f * objD * ridgeMul;
+								bestR = sst * 20.0f * objD * ridgeMul;
 							}
 						}
 						if (bestR > r) r = bestR;  // v532：只写雪堆，不写坑
@@ -2017,16 +2019,18 @@ namespace SnowDeform
 								// 后坑沿净隆起 ≈ 14——走出来的雪路 = 中间沟壑 + 两侧雪堆。
 								// v437b：tt 用椭圆归一化距离（坑沿雪堆环沿椭圆）。
 								const float tt = std::sqrt(dNorm2);
-								if (tt > 1.0f && tt < 2.6f) {  // v438k：雪堤加宽 2.2→2.6r（真实挤出是宽矮堤，不是细脊）
-									const float st = (tt - 1.0f) / 1.6f;
-									const float sinT = std::sin(st * 3.14159265f);
-									const float fade = sinT * sinT;
+								if (tt > 1.0f && tt < 3.0f) {  // v616：雪堤 2.6→3.0r（更宽更圆润）
+									const float st = (tt - 1.0f) / 2.0f;
+									// v615/v616：sinT² → smoothstep（圆润，峰值 0.5）+ 环加宽；
+									// 系数 12→30（smoothstep 峰值减半补偿 24 + 高 25% = 30）
+									const float sst = st * st * (3.0f - 2.0f * st);
+									const float fade = sst;
 									// v470：**物品坑沿雪堆关闭（用户"宽而浅"实锤）**——
 									// 战壕雪堆环到 2.6r（隆起区 1.6 倍半径）→ 视觉宽度
 									// 2.6×r≈33（坑 12.6 + 隆起圈）——物品滚动不该有
 									// 挤出雪堆，只留细坑。shape==9 → m=0（不隆起）。
 									// v490：删物品特判——物品/玩家统一雪堆 12（物品滚过也是雪堆挤出）
-									const float m = 12.0f * fade * fp.depth * decay;  // v442b：坑沿雪堆 22→12（v442 数据实锤：22 > 坑深 18，平滑摊进坑中心抵消凹陷 → deepest=-4/SINK=1.7。12 ≈ 坑深 26 的 46%，体积守恒）
+									const float m = 30.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
 									if (m > r) r = m;
 								}
 							}
@@ -4270,7 +4274,10 @@ namespace SnowDeform
 								// 光照平、沟壑立体感不足；1.3 介于原 1.35 与现 1.15 之间（网格
 								// 181² 变细后法线差分更准，增强可适度回提）。用户可再微调。
 								// v613：1.3→1.5（双 pass 平滑会柔化，增强补偿保持立体——细腻+立体）
-								const float kNormScale = 1.5f;
+								// v616：1.5→3.0（用户"法线增强深度加到最大，深坑不加强变形也有凹陷"）——
+								// 软饱和 raw/(1+|raw|)：kNormScale 3.0 下坑壁差分大 → nx 接近
+								// ±饱和 → 法线大幅侧倾 → 光照阴影深 → 视觉凹陷加深（几何不变）
+								const float kNormScale = 3.0f;
 								const float rawX = ((zW - zE) / sp2) * kNormScale;
 								const float rawY = ((zS - zN) / sp2) * kNormScale;
 								float nx = rawX / (1.0f + std::fabs(rawX));
