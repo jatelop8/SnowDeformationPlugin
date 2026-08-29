@@ -2169,6 +2169,10 @@ namespace SnowDeform
 		if (smaxGx >= sminGx && smaxGy >= sminGy) {
 			const int bw = smaxGx - sminGx + 1;
 			const int bh = smaxGy - sminGy + 1;
+			// v614：平滑 1 次 → 2 次（用户"更圆润"）——二次平滑坑/雪堆边缘更圆润、
+			// 块面感消减（第二次读第一次的平滑结果，有效双拉普拉斯）；成本 ×2
+			//（限幅框内，~6ms 封顶，v593 已限玩家 ±1024）。
+			for (int sp = 0; sp < 2; sp++) {
 			std::vector<float> dSmooth(static_cast<std::size_t>(bw) * bh, 0.0f);
 			std::vector<float> rSmooth(static_cast<std::size_t>(bw) * bh, 0.0f);
 			std::vector<float> dSmoothObj(static_cast<std::size_t>(bw) * bh, 0.0f);  // v529：物体场平滑
@@ -2214,6 +2218,7 @@ namespace SnowDeform
 					ridgeFieldObj[i] = rSmoothObj[boxIdx(bx, by)];
 				}
 			}
+			}  // v614：sp 平滑次数循环闭合（2 次）
 		}
 		fieldReady.store(true);
 	}
@@ -4278,6 +4283,37 @@ namespace SnowDeform
 								nb[1] = ny;
 								nb[2] = nz;
 							}
+						}
+						// v614：几何 z 高斯平滑（用户"更圆润"）——块面感根源 = 大 quad 平面 +
+						// z 突变；变形 z 写回后对 z 场 4 邻域平滑（0.5 self + 0.5 邻域，同
+						// v438 拉普拉斯权重），几何圆润 → 块面感消失；法线（差分）基于
+						// 平滑后 z → 法线也圆润。只对有变形的 highRes 网格做；边缘 2 圈
+						// 保留（cell 交界连续，与法线 kNormEdgeSkip 一致）。
+						if (deformed > 0 && vc == highResDim * highResDim) {
+							const auto zn = static_cast<int>(highResDim);
+							std::vector<float> zSmooth(static_cast<std::size_t>(zn) * zn, 0.0f);
+							const auto zAt = [&](int rr, int cc) -> float {
+								return *reinterpret_cast<const float*>(
+									lc.work.data() + (static_cast<std::size_t>(rr) * zn + cc) * stride + 8);
+							};
+							for (int sr = 1; sr < zn - 1; sr++) {
+								for (int sc = 1; sc < zn - 1; sc++) {
+									const float zv = zAt(sr, sc);
+									float zSum = zv;
+									int zc = 1;
+									if (sc > 0) { zSum += zAt(sr, sc - 1); zc++; }
+									if (sc < zn - 1) { zSum += zAt(sr, sc + 1); zc++; }
+									if (sr > 0) { zSum += zAt(sr - 1, sc); zc++; }
+									if (sr < zn - 1) { zSum += zAt(sr + 1, sc); zc++; }
+									zSmooth[static_cast<std::size_t>(sr) * zn + sc] =
+										0.5f * zv + 0.5f * (zSum / static_cast<float>(zc));
+								}
+							}
+							for (int sr = 1; sr < zn - 1; sr++)
+								for (int sc = 1; sc < zn - 1; sc++)
+									*reinterpret_cast<float*>(
+										lc.work.data() + (static_cast<std::size_t>(sr) * zn + sc) * stride + 8) =
+										zSmooth[static_cast<std::size_t>(sr) * zn + sc];
 						}
 						// v613：法线双 pass 高斯平滑（用户"法线做到非常细腻"）——
 						// v611 单 pass 3×3 后相邻法线仍可能有细微跳变 + 3B 压缩量化带；
