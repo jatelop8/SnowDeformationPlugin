@@ -2931,7 +2931,7 @@ namespace SnowDeform
 							{
 								auto& shell = SnowDeform::GetSnowShellMesh();
 								std::lock_guard<std::mutex> lk(shell.footMtx);
-								shell.footprints.push_back({ fpw.x, fpw.y, 0.3f, 0.0f, 0.0f, 0.0f,
+								shell.footprints.push_back({ fpw.x, fpw.y, 0.6f, 0.0f, 0.0f, 0.0f,
 									6.0f, 4.0f, fpw.x, fpw.y, 14, GetTickCount() });
 								shell.landFootDirty.store(true);
 							}
@@ -2949,7 +2949,7 @@ namespace SnowDeform
 				if (ddx * ddx + ddy * ddy > 20.0f * 20.0f) {
 					auto& shell = SnowDeform::GetSnowShellMesh();
 					std::lock_guard<std::mutex> lk(shell.footMtx);
-					shell.footprints.push_back({ ap.x, ap.y, 0.3f, 0.0f, 0.0f, 0.0f,
+					shell.footprints.push_back({ ap.x, ap.y, 0.6f, 0.0f, 0.0f, 0.0f,
 						6.0f, 4.0f, pxx, pyy, 14, GetTickCount() });
 					shell.landFootDirty.store(true);
 				}
