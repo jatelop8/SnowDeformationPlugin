@@ -2019,10 +2019,15 @@ namespace SnowDeform
 								// 后坑沿净隆起 ≈ 14——走出来的雪路 = 中间沟壑 + 两侧雪堆。
 								// v437b：tt 用椭圆归一化距离（坑沿雪堆环沿椭圆）。
 								const float tt = std::sqrt(dNorm2);
-								// v625：**马专属雪堆极宽环（shape=15，用户"雪堆非常宽"）**——
-								// 普通战壕 1~3r（v616 2.6→3.0r）；马 1~5r 超宽环 + 高度 1.5×
-								//（配合盖章 depth 1.16 深坑，宽雪堆挤出感强）。其他 shape 不变。
-								const float ringFar = (fp.shape == 15) ? 5.0f : 3.0f;
+								// v625/v626：**马雪堆环锚点调整**——
+								// shape=15（马蹄坑）：m=0 **无雪堆环**（用户"雪堆以马中心为
+								// 锚点，不要用脚"——坑在蹄下，环不再跟蹄子）；
+								// shape=16（马中心轨迹）：1~5r 超宽环 + 高度 1.5×
+								//（rL/rS=24 覆盖 4 蹄跨度，雪堆带沿马中心连续）；
+								// 其他 shape 保持普通 1~3r 环（v616）。
+								float ringFar = 3.0f;
+								if (fp.shape == 16)
+									ringFar = 5.0f;
 								if (tt > 1.0f && tt < ringFar) {  // v616：雪堤 2.6→3.0r（更宽更圆润）
 									const float st = (tt - 1.0f) / (ringFar - 1.0f);
 									// v615/v616：sinT² → smoothstep（圆润，峰值 0.5）+ 环加宽；
@@ -2036,7 +2041,9 @@ namespace SnowDeform
 									// v490：删物品特判——物品/玩家统一雪堆 12（物品滚过也是雪堆挤出）
 									float m = 17.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
 									if (fp.shape == 15)
-										m *= 1.5f;  // v625：马雪堆更高更明显
+										m = 0.0f;  // v626：马蹄坑不带雪堆环（环在中心 shape=16）
+									else if (fp.shape == 16)
+										m *= 1.5f;  // v625：马中心宽雪堆更高更明显
 									if (m > r) r = m;
 								}
 							}
@@ -2909,8 +2916,11 @@ namespace SnowDeform
 					if (hoofNodes.size() > 4)
 						hoofNodes.resize(4);
 					const auto keyBase = static_cast<std::uint64_t>(a->formID) * 16;
+					float cx = 0.0f, cy = 0.0f;
 					for (int hi = 0; hi < static_cast<int>(hoofNodes.size()); hi++) {
 						const auto hw = hoofNodes[hi]->world.translate;
+						cx += hw.x;
+						cy += hw.y;
 						auto& hlp = lastPosHoof[keyBase + static_cast<std::uint64_t>(hi)];
 						if (!hlp.init) {
 							hlp.x = hw.x;
@@ -2925,16 +2935,42 @@ namespace SnowDeform
 						if (hdx * hdx + hdy * hdy > 12.0f * 12.0f) {
 							auto& shell = SnowDeform::GetSnowShellMesh();
 							std::lock_guard<std::mutex> lk(shell.footMtx);
-							// v623：depth 0.8→0.6（用户"马匹和物体滚动脚印数据同步"——
-							// 物体滚动 kObjDepth=0.6，马 0.8 深 33% 不一致 → 统一 0.6）
-							// v624：rL/rS 8→4（用户"马的宽度改成 4"——蹄迹战壕收窄）
-							// v625：**马专属 shape=15（用户"马脚印深坑加10、雪堆非常宽"）**——
-							// depth 0.6→1.16（坑 -10.8→-20.8，比物体/玩家深 10 单位）；
-							// shape 14→15 触发场写入的极宽雪堆环特判（5r，见顶点循环）。
+							// v623：depth 0.8→0.6（用户"马匹和物体滚动脚印数据同步"）
+							// v624：rL/rS 8→4（用户"马的宽度改成 4"）
+							// v625：shape=15 马专属深坑（depth 1.16 → -20.8，深 10 单位）
+							// v626：**shape=15 只留坑、雪堆环移走（用户"雪堆以马中心为锚
+							// 点，不要用脚"）**——马蹄坑不再带 5r 宽环（场写入 shape==15
+							// m=0），雪堆宽环由 shape=16（马中心轨迹）提供。
 							shell.footprints.push_back({ hw.x, hw.y, 1.16f, 0.0f, 0.0f, 0.0f,
 								4.0f, 4.0f, hpx, hpy, 15, GetTickCount() });
 							shell.landFootDirty.store(true);
 							gStmpType[2].fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+					// v626：**马中心宽雪堆锚点（4 蹄平均位置，用户"检测马脚具体方位来
+					// 调整雪堆"）**——坑在蹄子正下（shape=15），超宽雪堆环（shape=16，
+					// rL/rS=24 覆盖 4 蹄跨度，场写入 5r 环 ×1.5 高）沿马中心轨迹连续，
+					// 视觉 = 中间一条宽雪堆带 + 两侧蹄坑，不再每蹄一圈乱堆。
+					if (hoofNodes.size() >= 1) {
+						cx /= static_cast<float>(hoofNodes.size());
+						cy /= static_cast<float>(hoofNodes.size());
+						auto& clp = lastPosHoof[keyBase + 4];
+						if (!clp.init) {
+							clp.x = cx;
+							clp.y = cy;
+							clp.init = true;
+						} else {
+							const float cdx = cx - clp.x, cdy = cy - clp.y;
+							const float cpx = clp.x, cpy = clp.y;
+							clp.x = cx;
+							clp.y = cy;
+							if (cdx * cdx + cdy * cdy > 12.0f * 12.0f) {
+								auto& shell = SnowDeform::GetSnowShellMesh();
+								std::lock_guard<std::mutex> lk(shell.footMtx);
+								shell.footprints.push_back({ cx, cy, 0.3f, 0.0f, 0.0f, 0.0f,
+									24.0f, 24.0f, cpx, cpy, 16, GetTickCount() });
+								shell.landFootDirty.store(true);
+							}
 						}
 					}
 					sDbgActors++;
