@@ -4259,7 +4259,8 @@ namespace SnowDeform
 								// v610：1.15→1.3（用户 2026-08-30"走路沟壑很假"）——1.15 太缓
 								// 光照平、沟壑立体感不足；1.3 介于原 1.35 与现 1.15 之间（网格
 								// 181² 变细后法线差分更准，增强可适度回提）。用户可再微调。
-								const float kNormScale = 1.3f;
+								// v613：1.3→1.5（双 pass 平滑会柔化，增强补偿保持立体——细腻+立体）
+								const float kNormScale = 1.5f;
 								const float rawX = ((zW - zE) / sp2) * kNormScale;
 								const float rawY = ((zS - zN) / sp2) * kNormScale;
 								float nx = rawX / (1.0f + std::fabs(rawX));
@@ -4278,22 +4279,41 @@ namespace SnowDeform
 								nb[2] = nz;
 							}
 						}
-						// v611：法线高斯平滑 + 压缩写回（边缘 2 圈不参与平滑，保留差分结果）
+						// v613：法线双 pass 高斯平滑（用户"法线做到非常细腻"）——
+						// v611 单 pass 3×3 后相邻法线仍可能有细微跳变 + 3B 压缩量化带；
+						// 双 pass [1,2,1]²（等效 5×5 高斯）→ 法线场连续细腻、阴影无 banding。
+						// 边缘 2 圈不参与平滑（保留差分结果，边界与相邻 cell 连续）。
+						std::vector<float> normTmp(static_cast<std::size_t>(n) * n * 3, 0.0f);
+						const auto gauss3 = [&](const float* src, float* dst, int srow, int scol) {
+							float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+							for (int dr = -1; dr <= 1; dr++) {
+								for (int dc = -1; dc <= 1; dc++) {
+									const float w = (dr == 0 ? 2.0f : 1.0f) * (dc == 0 ? 2.0f : 1.0f);
+									const auto* sn = src + (static_cast<std::size_t>(srow + dr) * n + (scol + dc)) * 3;
+									sx += sn[0] * w;
+									sy += sn[1] * w;
+									sz += sn[2] * w;
+								}
+							}
+							auto* dn = dst + (static_cast<std::size_t>(srow) * n + scol) * 3;
+							dn[0] = sx * (1.0f / 16.0f);
+							dn[1] = sy * (1.0f / 16.0f);
+							dn[2] = sz * (1.0f / 16.0f);
+						};
+						// pass 1: normBuf → normTmp
+						for (int sr = 1; sr < n - 1; sr++)
+							for (int sc = 1; sc < n - 1; sc++)
+								gauss3(normBuf.data(), normTmp.data(), sr, sc);
+						// pass 2: normTmp → normBuf
+						for (int sr = 1; sr < n - 1; sr++)
+							for (int sc = 1; sc < n - 1; sc++)
+								gauss3(normTmp.data(), normBuf.data(), sr, sc);
+						// 归一化 + 压缩写回 @20（3B）
 						for (int sr = 1; sr < n - 1; sr++) {
 							for (int sc = 1; sc < n - 1; sc++) {
-								float sx = 0.0f, sy = 0.0f, sz = 0.0f;
-								for (int dr = -1; dr <= 1; dr++) {
-									for (int dc = -1; dc <= 1; dc++) {
-										const float w = (dr == 0 ? 2.0f : 1.0f) * (dc == 0 ? 2.0f : 1.0f);
-										const auto* sn = normBuf.data() +
-											(static_cast<std::size_t>(sr + dr) * n + (sc + dc)) * 3;
-										sx += sn[0] * w;
-										sy += sn[1] * w;
-										sz += sn[2] * w;
-									}
-								}
-								const float inv16 = 1.0f / 16.0f;
-								float nx = sx * inv16, ny = sy * inv16, nz = sz * inv16;
+								const auto* sn = normBuf.data() +
+									(static_cast<std::size_t>(sr) * n + sc) * 3;
+								float nx = sn[0], ny = sn[1], nz = sn[2];
 								const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
 								if (len > 1.0e-6f) {
 									nx /= len;
