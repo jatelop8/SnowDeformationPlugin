@@ -1814,7 +1814,7 @@ namespace SnowDeform
 								// v616：环 2.6→3.0rC + 过渡 1.6→2.0（更宽更缓更圆润）；
 								// 系数 16→20（雪堆高 25%，用户"雪堆可以高一点"）。
 								const float sst = st * st * (3.0f - 2.0f * st);
-								bestR = sst * 26.0f * objD * ridgeMul;
+								bestR = sst * 13.0f * objD * ridgeMul;
 							}
 						} else {
 							const float dist = std::sqrt((wx - fp.x) * (wx - fp.x) + (wy - fp.y) * (wy - fp.y));
@@ -1822,7 +1822,7 @@ namespace SnowDeform
 								const float st = (dist - rC) / (2.0f * rC);
 								// v616：同胶囊段——smoothstep + 环加宽 + 系数 20
 								const float sst = st * st * (3.0f - 2.0f * st);
-								bestR = sst * 26.0f * objD * ridgeMul;
+								bestR = sst * 13.0f * objD * ridgeMul;
 							}
 						}
 						if (bestR > r) r = bestR;  // v532：只写雪堆，不写坑
@@ -2030,7 +2030,7 @@ namespace SnowDeform
 									// 2.6×r≈33（坑 12.6 + 隆起圈）——物品滚动不该有
 									// 挤出雪堆，只留细坑。shape==9 → m=0（不隆起）。
 									// v490：删物品特判——物品/玩家统一雪堆 12（物品滚过也是雪堆挤出）
-									const float m = 34.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
+									const float m = 17.0f * fade * fp.depth * decay;  // v616：12→30（smoothstep 峰值 0.5 补偿 ×2=24 + 高 25%=30，用户"雪堆高一点"）
 									if (m > r) r = m;
 								}
 							}
