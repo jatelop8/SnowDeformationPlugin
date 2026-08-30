@@ -1,17 +1,23 @@
 DynamicSnow - Dynamic Snow Deformation
 ======================================
-Version: v609 (2026-08-28)
+Version: v630 (2026-08-30)
 Requires: Skyrim SE/AE / SKSE64 / Address Library / DynamicShaderCore / Smooth Terrain
 
 【FEATURES】
 - Player leaves continuous trenches in snow / sand / mud (Black-Myth-style
-  real geometric deformation, no shader tricks)
+  real geometric deformation on the actual landscape mesh, no shader tricks)
+- Horses & animals leave independent hoof prints under each hoof (V1
+  stamping algorithm restored in v630)
 - NPCs, enemies, wolves / horses / bears / foxes, Dwemer machines leave
   trails as they move
 - Corpses leave a shallow imprint pit + surrounding snow mound (burial
   effect) on death or when grabbed and dropped
 - Weapon strikes raise snow mounds; arrows / spell impacts blast craters
 - Dropped items carve rolling trails
+- Sand / mud leave shallow imprints without mounds (material response)
+- Footprints persist across cell borders (continuous world-space field)
+- Recalculated normals (dual-pass Gaussian) so footprints catch light
+- Jump detection - no stamps while airborne
 - Fully compatible with ENB (pure geometry, no shader replacement)
 
 【REQUIREMENTS】(install all, load BEFORE this plugin)
@@ -36,13 +42,23 @@ Edit Data\SKSE\Plugins\DynamicSnow.ini (in MO2: right-click the mod ->
 "Open in Explorer"):
 
   [General]
-  MaxFootprints=400    ; snow pile / footprint count kept alive
+  MaxFootprints=100    ; snow pile / footprint count kept alive
                        ; 100 - 2000, default 400 (~10s of trail)
                        ; lower  = shorter trail, steadier FPS
                        ; higher = longer trail, heavier cost
 
 Restart the game to apply. Log: Documents\My Games\Skyrim Special
 Edition\SKSE\DynamicSnow.log
+
+【CHANGELOG - v630】
+- Fully restore the original V1 (00afed2) horse/animal stamping algorithm:
+  ForEachHighActor (high-priority active actors only), 300-unit distance,
+  global 300ms throttle shared by all animals, 20-unit gate per foot,
+  single-point ellipse hoof print (rL=6 / rS=4, depth 0.3)
+- ForAllActors keeps only corpse imprints (v590+)
+- Riding leaves clean ellipse hoof prints under each hoof
+- Earlier v6xx: smoothed geometry & normals, sand/mud shallow imprints,
+  horse 4-hoof stamps, fast startup (~5s), jump detection
 
 【COMPATIBILITY】
 - Works alongside ENB Series (tested)
@@ -52,8 +68,12 @@ Edition\SKSE\DynamicSnow.log
 【OPEN SOURCE】
 - License: GPL-3.0-or-later WITH Modding Exception AND GPL-3.0 Linking Exception
 - Derived from (original copyright notices retained):
-  - Skyrim Community Shaders (doodlum, MIT) - deformation map / stamping /
-    snow class logic: https://github.com/doodlum/skyrim-community-shaders
+  - Skyrim Community Shaders (doodlum) - GPL-3.0-or-later WITH Modding
+    Exception AND GPL-3.0 Linking Exception - core codebase / deformation
+    map / stamping / snow class logic:
+    https://github.com/doodlum/skyrim-community-shaders
   - Snow Deformation feature PR (Josef/PppPlyr1) - ConeCS slope / refill
-  - Smooth Terrain (hakasapl) - REL offsets & call-site patching methods
+  - Smooth Terrain (hakasapl) - GPL-3.0 - REL offsets & call-site patching
+    methods
+- Build dependencies (MIT, not derived from): CommonLibSSE-NG, spdlog
 - Source: https://github.com/jatelop8/SnowDeformationPlugin
